@@ -270,7 +270,14 @@ type StatementContext struct {
 	// If the select statement was like 'select * from t as of timestamp ...' or in a stale read transaction
 	// or is affected by the tidb_read_staleness session variable, then the statement will be makred as isStaleness
 	// in stmtCtx
-	IsStaleness     bool
+	IsStaleness bool
+	// StaleReadTS is the evaluated snapshot timestamp (TSO) used for stale read in this statement.
+	//
+	// For a pure read-only statement, it is the statement's read ts.
+	// For a DML statement that contains a stale-read SELECT subplan (e.g. INSERT ... SELECT ... AS OF TIMESTAMP ...),
+	// it is intended to be used as the snapshot read ts for that SELECT part only, while the write txn still uses
+	// a normal for-update ts.
+	StaleReadTS     uint64
 	InRestrictedSQL bool
 	ViewDepth       int32
 	// mu struct holds variables that change during execution.

@@ -104,6 +104,66 @@ func getCurrentExternalTimestamp(t *testing.T, tk *testkit.TestKit) uint64 {
 	return externalTimestamp
 }
 
+func TestInsertSelectAsOfTimestamp(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("drop table if exists t2")
+	tk.MustExec("create table t (id int primary key, v int)")
+	tk.MustExec("insert into t values (1, 10)")
+	// Make sure the AS OF timestamp is definitely after the DDL/DML commit TS in mockstore,
+	// otherwise the snapshot infoschema may not see table `t`.
+	tk.MustExec("do sleep(1)")
+
+	tk.MustExec("create table t2 (id int primary key, v int)")
+	tk.MustExec("insert into t2 select * from t as of timestamp now() where id = 1")
+	tk.MustQuery("select * from t2").Check(testkit.Rows("1 10"))
+}
+
+func TestInsertSelectAsOfTimestampBetweenUpdates(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("drop table if exists t2")
+	tk.MustExec("create table t (id int primary key, v int)")
+
+	tk.MustExec("insert into t values (1, 10)")
+	// `AS OF TIMESTAMP` converts datetime -> TSO with logical=0. If we take `now(6)` too close to the commit TS,
+	// the resulting TSO might still be less than the commit TSO (logical > 0 in the same ms). Ensure time advances.
+	tk.MustExec("do sleep(0.01)")
+	tk.MustExec("set @ts1 = now(6)")
+	tk.MustExec("do sleep(0.01)")
+
+	tk.MustExec("update t set v = 20 where id = 1")
+	tk.MustExec("do sleep(0.01)")
+	tk.MustExec("set @ts2 = now(6)")
+	tk.MustExec("do sleep(0.01)")
+
+	tk.MustExec("update t set v = 30 where id = 1")
+	tk.MustExec("do sleep(0.01)")
+	tk.MustExec("set @ts3 = now(6)")
+
+	tk.MustExec("create table t2 (id int primary key, v int)")
+
+	// should be (1, 10)
+	tk.MustExec("insert into t2 select * from t as of timestamp @ts1 where id = 1")
+	tk.MustQuery("select * from t2").Check(testkit.Rows("1 10"))
+	tk.MustExec("delete from t2")
+
+	// should be (1, 20)
+	tk.MustExec("insert into t2 select * from t as of timestamp @ts2 where id = 1")
+	tk.MustQuery("select * from t2").Check(testkit.Rows("1 20"))
+	tk.MustExec("delete from t2")
+
+	// should be (1, 30)
+	tk.MustExec("insert into t2 select * from t as of timestamp @ts3 where id = 1")
+	tk.MustQuery("select * from t2").Check(testkit.Rows("1 30"))
+	tk.MustExec("delete from t2")
+}
+
 func TestStaleReadProcessorWithSelectTable(t *testing.T) {
 	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
 	tk := testkit.NewTestKit(t, store)
@@ -239,7 +299,7 @@ func TestStaleReadProcessorWithExecutePreparedStmt(t *testing.T) {
 	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
 	tk := testkit.NewTestKit(t, store)
 	p1 := genStaleReadPoint(t, tk)
-	//p2 := genStaleReadPoint(t, tk)
+	// p2 := genStaleReadPoint(t, tk)
 	ctx := context.Background()
 
 	// create local temporary table to check processor's infoschema will consider temporary table

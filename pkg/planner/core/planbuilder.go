@@ -4528,6 +4528,22 @@ func (b *PlanBuilder) buildSelectPlanOfInsert(ctx context.Context, insert *ast.I
 		}
 	}
 	nodeW := resolve.NewNodeWWithCtx(insert.Select, b.resolveCtx)
+	staleReadTS := b.ctx.GetSessionVars().StmtCtx.StaleReadTS
+	originIS := b.is
+	if staleReadTS != 0 {
+		// `INSERT ... SELECT ... AS OF ...` should use the snapshot infoschema for building the SELECT subplan only.
+		// PlanContext is usually backed by session, but keep this guarded for safety in tests.
+		sctx, ok := b.ctx.(sessionctx.Context)
+		if !ok {
+			return plannererrors.ErrInternal.GenWithStack("unexpected plan context type %T for stale read in INSERT ... SELECT", b.ctx)
+		}
+		staleIS, err := staleread.GetSessionSnapshotInfoSchema(sctx, staleReadTS)
+		if err != nil {
+			return err
+		}
+		b.is = staleIS
+		defer func() { b.is = originIS }()
+	}
 	selectPlan, err := b.Build(ctx, nodeW)
 	if err != nil {
 		return err

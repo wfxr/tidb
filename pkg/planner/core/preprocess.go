@@ -232,6 +232,13 @@ type preprocessor struct {
 	flag   preprocessorFlag
 	stmtTp byte
 	showTp ast.ShowStmtType
+	// topStmtTp is the top-level statement type of the current preprocess call.
+	// Unlike stmtTp, it should not be overwritten by nested SelectStmt (e.g. INSERT ... SELECT ...).
+	topStmtTp byte
+	// selectStmtDepth tracks whether we're currently traversing inside a SelectStmt (including nested subqueries).
+	// It's used to scope stale read processing to SELECT query blocks only. Relying on stmtTp is insufficient
+	// because some statements (e.g. INSERT ... SELECT ...) visit the SELECT part first and then other clauses.
+	selectStmtDepth int
 
 	// tableAliasInJoin is a stack that keeps the table alias names for joins.
 	// len(tableAliasInJoin) may bigger than 1 because the left/right child of join may be subquery that contains `JOIN`
@@ -255,25 +262,44 @@ func (p *preprocessor) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 	case *ast.AdminStmt:
 		p.checkAdminCheckTableGrammar(node)
 	case *ast.DeleteStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeDelete
+		}
 		p.stmtTp = TypeDelete
 	case *ast.SelectStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeSelect
+		}
 		p.stmtTp = TypeSelect
+		p.selectStmtDepth++
 		if node.With != nil {
 			p.preprocessWith.cteStack = append(p.preprocessWith.cteStack, node.With.CTEs)
 		}
 		p.checkSelectNoopFuncs(node)
 	case *ast.SetOprStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeSetOpr
+		}
 		if node.With != nil {
 			p.preprocessWith.cteStack = append(p.preprocessWith.cteStack, node.With.CTEs)
 		}
 	case *ast.UpdateStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeUpdate
+		}
 		p.stmtTp = TypeUpdate
 	case *ast.InsertStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeInsert
+		}
 		p.stmtTp = TypeInsert
 		// handle the insert table name imminently
 		// insert into t with t ..., the insert can not see t here. We should hand it before the CTE statement
 		p.handleTableName(node.Table.TableRefs.Left.(*ast.TableSource).Source.(*ast.TableName))
 	case *ast.ExecuteStmt:
+		if p.topStmtTp == TypeInvalid {
+			p.topStmtTp = TypeExecute
+		}
 		p.stmtTp = TypeExecute
 		p.resolveExecuteStmt(node)
 	case *ast.CreateTableStmt:
@@ -525,6 +551,10 @@ func bindableStmtType(node ast.StmtNode) byte {
 }
 
 func (p *preprocessor) tableByName(tn *ast.TableName) (table.Table, error) {
+	return p.tableByNameWithInfoSchema(tn, p.ensureInfoSchema())
+}
+
+func (p *preprocessor) tableByNameWithInfoSchema(tn *ast.TableName, is infoschema.InfoSchema) (table.Table, error) {
 	currentDB := p.sctx.GetSessionVars().CurrentDB
 	if tn.Schema.String() != "" {
 		currentDB = tn.Schema.L
@@ -533,7 +563,6 @@ func (p *preprocessor) tableByName(tn *ast.TableName) (table.Table, error) {
 		return nil, errors.Trace(plannererrors.ErrNoDB)
 	}
 	sName := ast.NewCIStr(currentDB)
-	is := p.ensureInfoSchema()
 
 	// for 'SHOW CREATE VIEW/SEQUENCE ...' statement, ignore local temporary tables.
 	if p.stmtTp == TypeShow && (p.showTp == ast.ShowCreateView || p.showTp == ast.ShowCreateSequence) {
@@ -707,6 +736,9 @@ func (p *preprocessor) Leave(in ast.Node) (out ast.Node, ok bool) {
 	case *ast.SelectStmt:
 		if x.With != nil {
 			p.preprocessWith.cteStack = p.preprocessWith.cteStack[0 : len(p.preprocessWith.cteStack)-1]
+		}
+		if p.selectStmtDepth > 0 {
+			p.selectStmtDepth--
 		}
 	case *ast.SetOprStmt:
 		if x.With != nil {
@@ -1753,16 +1785,30 @@ func (p *preprocessor) handleTableName(tn *ast.TableName) {
 		return
 	}
 
-	if p.stmtTp == TypeSelect {
+	if p.selectStmtDepth > 0 {
 		if p.err = p.staleReadProcessor.OnSelectTable(tn); p.err != nil {
 			return
 		}
-		if p.err = p.updateStateFromStaleReadProcessor(); p.err != nil {
-			return
+		if p.topStmtTp == TypeInsert {
+			// For INSERT ... SELECT ... AS OF ..., stale read should affect the SELECT source only.
+			// Record the evaluated ts for later planning/execution, but don't switch the statement-level txn context.
+			if p.staleReadProcessor.IsStaleness() {
+				p.sctx.GetSessionVars().StmtCtx.StaleReadTS = p.staleReadProcessor.GetStalenessReadTS()
+			}
+		} else {
+			if p.err = p.updateStateFromStaleReadProcessor(); p.err != nil {
+				return
+			}
 		}
 	}
 
-	table, err := p.tableByName(tn)
+	isForLookup := p.ensureInfoSchema()
+	if p.selectStmtDepth > 0 && p.staleReadProcessor.IsStaleness() {
+		if staleIS := p.staleReadProcessor.GetStalenessInfoSchema(); staleIS != nil {
+			isForLookup = staleIS
+		}
+	}
+	table, err := p.tableByNameWithInfoSchema(tn, isForLookup)
 	if err != nil {
 		p.err = err
 		return

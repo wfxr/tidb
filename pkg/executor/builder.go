@@ -118,6 +118,11 @@ type executorBuilder struct {
 	inInsertStmt     bool
 	inSelectLockStmt bool
 
+	// snapshotTSOverride forces the builder to use a fixed read ts (and snapshot) for all read operations.
+	// It's mainly used for statements that contain a stale-read SELECT subplan but still need a normal write txn
+	// (e.g. INSERT ... SELECT ... AS OF TIMESTAMP ...).
+	snapshotTSOverride uint64
+
 	// forDataReaderBuilder indicates whether the builder is used by a dataReaderBuilder.
 	// When forDataReader is true, the builder should use the dataReaderTS as the executor read ts. This is because
 	// dataReaderBuilder can be used in concurrent goroutines, so we must ensure that getting the ts should be thread safe and
@@ -1012,9 +1017,33 @@ func (b *executorBuilder) buildInsert(v *physicalop.Insert) exec.Executor {
 		return nil
 	}
 
-	selectExec := b.build(v.SelectPlan)
-	if b.err != nil {
-		return nil
+	var selectExec exec.Executor
+	if v.SelectPlan != nil {
+		// For INSERT ... SELECT ... AS OF ..., the SELECT part should read from a fixed stale snapshot,
+		// while the INSERT write still uses normal for-update ts.
+		if staleReadTS := b.ctx.GetSessionVars().StmtCtx.StaleReadTS; staleReadTS != 0 {
+			staleIS, err := staleread.GetSessionSnapshotInfoSchema(b.ctx, staleReadTS)
+			if err != nil {
+				b.err = err
+				return nil
+			}
+			builderForSelect := *b
+			builderForSelect.is = staleIS
+			builderForSelect.isStaleness = true
+			builderForSelect.snapshotTSOverride = staleReadTS
+			builderForSelect.err = nil
+
+			selectExec = builderForSelect.build(v.SelectPlan)
+			if builderForSelect.err != nil {
+				b.err = builderForSelect.err
+				return nil
+			}
+		} else {
+			selectExec = b.build(v.SelectPlan)
+			if b.err != nil {
+				return nil
+			}
+		}
 	}
 	var children []exec.Executor
 	if selectExec != nil {
@@ -2303,6 +2332,9 @@ func (b *executorBuilder) buildTableDual(v *physicalop.PhysicalTableDual) exec.E
 // `getSnapshotTS` returns for-update-ts if in insert/update/delete/lock statement otherwise the isolation read ts
 // Please notice that in RC isolation, the above two ts are the same
 func (b *executorBuilder) getSnapshotTS() (ts uint64, err error) {
+	if b.snapshotTSOverride != 0 {
+		return b.snapshotTSOverride, nil
+	}
 	if b.forDataReaderBuilder {
 		return b.dataReaderTS, nil
 	}
@@ -2317,6 +2349,29 @@ func (b *executorBuilder) getSnapshotTS() (ts uint64, err error) {
 // getSnapshot get the appropriate snapshot from txnManager and set
 // the relevant snapshot options before return.
 func (b *executorBuilder) getSnapshot() (kv.Snapshot, error) {
+	if b.snapshotTSOverride != 0 {
+		snapshot := b.ctx.GetStore().GetSnapshot(kv.Version{Ver: b.snapshotTSOverride})
+		if interceptor := temptable.SessionSnapshotInterceptor(b.ctx, b.is); interceptor != nil {
+			snapshot.SetOption(kv.SnapInterceptor, interceptor)
+		}
+		sessVars := b.ctx.GetSessionVars()
+		if sessVars.InRestrictedSQL {
+			snapshot.SetOption(kv.RequestSourceInternal, true)
+		}
+		if tp := sessVars.RequestSourceType; tp != "" {
+			snapshot.SetOption(kv.RequestSourceType, tp)
+		}
+		if tp := sessVars.ExplicitRequestSourceType; tp != "" {
+			snapshot.SetOption(kv.ExplicitRequestSourceType, tp)
+		}
+		if sessVars.LoadBasedReplicaReadThreshold > 0 {
+			snapshot.SetOption(kv.LoadBasedReplicaReadThreshold, sessVars.LoadBasedReplicaReadThreshold)
+		}
+		snapshot.SetOption(kv.IsStalenessReadOnly, true)
+		InitSnapshotWithSessCtx(snapshot, b.ctx, &b.readReplicaScope)
+		return snapshot, nil
+	}
+
 	var snapshot kv.Snapshot
 	var err error
 
