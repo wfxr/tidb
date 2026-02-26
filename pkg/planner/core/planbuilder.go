@@ -4044,6 +4044,14 @@ func (b *PlanBuilder) buildInsert(ctx context.Context, insert *ast.InsertStmt) (
 		}
 		return nil, err
 	}
+
+	op := "INSERT"
+	if insert.IsReplace {
+		op = "REPLACE"
+	}
+	if err := checkMViewUpdatable(b.ctx, tableInfo, tableInfo.Name.O, op); err != nil {
+		return nil, err
+	}
 	// Build Schema with DBName otherwise ColumnRef with DBName cannot match any Column in Schema.
 	schema, names, err := expression.TableInfo2SchemaAndNames(b.ctx.GetExprCtx(), tn.Schema, tableInfo)
 	if err != nil {
@@ -4158,6 +4166,34 @@ func (b *PlanBuilder) buildInsert(ctx context.Context, insert *ast.InsertStmt) (
 	}
 	err = insertPlan.buildOnInsertFKTriggers(b.ctx, b.is, tnW.DBInfo.Name.L)
 	return insertPlan, err
+}
+
+func checkMViewUpdatable(
+	pctx base.PlanContext,
+	tableInfo *model.TableInfo,
+	tableName string,
+	op string,
+) error {
+	if tableInfo == nil {
+		return nil
+	}
+
+	sc := pctx.GetSessionVars().StmtCtx
+	if tableName == "" {
+		tableName = tableInfo.Name.O
+	}
+
+	// Explicit write to materialized view is not allowed
+	if tableInfo.MaterializedView != nil && !sc.AllowExplicitWriteToMaterializedView() {
+		return plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tableName, op)
+	}
+
+	// Explicit write to materialized view log is not allowed
+	if tableInfo.MaterializedViewLog != nil && !sc.AllowExplicitWriteToMaterializedViewLog() {
+		return plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tableName, op)
+	}
+
+	return nil
 }
 
 func (p *Insert) resolveOnDuplicate(onDup []*ast.Assignment, tblInfo *model.TableInfo, yield func(ast.ExprNode) (expression.Expression, error)) (map[string]struct{}, error) {

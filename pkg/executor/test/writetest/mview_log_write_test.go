@@ -20,10 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/executor"
 	"github.com/pingcap/tidb/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/stretchr/testify/require"
@@ -92,6 +94,16 @@ func (c *ddlCtrl) releaseAndWaitFinish(t *testing.T) {
 	})
 }
 
+func execAsMLogPurge(tk *testkit.TestKit, sql string) {
+	vars := tk.Session().GetSessionVars()
+	orig := vars.MViewInternalDML
+	vars.MViewInternalDML = stmtctx.MViewInternalDMLPurge
+	defer func() {
+		vars.MViewInternalDML = orig
+	}()
+	tk.MustExec(sql)
+}
+
 func TestMLogInsert(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -109,7 +121,7 @@ func TestMLogInsert(t *testing.T) {
 	))
 
 	// Multi-row insert.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("insert into t values (2,20,200), (3,30,300), (4,40,400)")
 	tk.MustQuery(
 		"select a, b, c, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t` order by a",
@@ -132,6 +144,20 @@ func TestMLogInsert(t *testing.T) {
 	))
 }
 
+func TestMLogExplicitDMLRejected(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t (a int primary key, b int)")
+	tk.MustExec("create materialized view log on t (a, b)")
+
+	tk.MustGetErrCode("insert into `$mlog$t` values (1, 2, 'I', 1)", errno.ErrNonUpdatableTable)
+	tk.MustGetErrCode("replace into `$mlog$t` values (1, 2, 'I', 1)", errno.ErrNonUpdatableTable)
+	tk.MustGetErrCode("update `$mlog$t` set a=1", errno.ErrNonUpdatableTable)
+	tk.MustGetErrCode("delete from `$mlog$t`", errno.ErrNonUpdatableTable)
+}
+
 func TestMLogInsertSelect(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -152,7 +178,7 @@ func TestMLogInsertSelect(t *testing.T) {
 	))
 
 	// (b) INSERT IGNORE ... SELECT — conflicting rows are skipped.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("delete from src")
 	tk.MustExec("insert into src values (1,11,111), (3,30,300)")
 	tk.MustExec("insert ignore into t select * from src")
@@ -166,7 +192,7 @@ func TestMLogInsertSelect(t *testing.T) {
 	))
 
 	// (c) INSERT ... SELECT ... ON DUPLICATE KEY UPDATE — conflicting row updated, new row inserted.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("delete from src")
 	tk.MustExec("insert into src values (1,11,111), (4,40,400)")
 	tk.MustExec("insert into t select * from src on duplicate key update b=values(b), c=values(c)")
@@ -201,7 +227,7 @@ func TestMLogUpdate(t *testing.T) {
 	))
 
 	// Multi-row update.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("update t set c = c + 1 where a in (2, 3)")
 	tk.MustQuery(
 		"select a, b, c, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -231,7 +257,7 @@ func TestMLogDelete(t *testing.T) {
 	))
 
 	// Multi-row delete.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("delete from t where a in (2, 3)")
 	tk.MustQuery(
 		"select a, b, c, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -756,7 +782,7 @@ func TestMLogPartialColumnsMapping(t *testing.T) {
 		"30 10 I 1",
 	))
 
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("update t set c=21 where a=1")
 	tk.MustQuery("select * from `$mlog$t`").Check(testkit.Rows())
 
@@ -768,7 +794,7 @@ func TestMLogPartialColumnsMapping(t *testing.T) {
 		"30 11 U 1",
 	))
 
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("update t set d=31 where a=1")
 	tk.MustQuery(
 		"select d, b, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -789,7 +815,7 @@ func TestMLogPrunedColumns(t *testing.T) {
 		tk.MustExec("create table t (a int, b int)")
 		tk.MustExec("create materialized view log on t (a, b)")
 		tk.MustExec("insert into t values (1,10)")
-		tk.MustExec("delete from `$mlog$t`")
+		execAsMLogPurge(tk, "delete from `$mlog$t`")
 
 		// Delete normally can prune non-handle/index columns, but mlog RemoveRecord reads
 		// tracked columns by base offsets; pruning them would make mlog writing fail.
@@ -809,7 +835,7 @@ func TestMLogPrunedColumns(t *testing.T) {
 		tk.MustExec("create table t (a int, b int)")
 		tk.MustExec("create materialized view log on t (a, b)")
 		tk.MustExec("insert into t values (1,10)")
-		tk.MustExec("delete from `$mlog$t`")
+		execAsMLogPurge(tk, "delete from `$mlog$t`")
 
 		// Even if only column b is updated, UpdateRecord still needs full writable row data.
 		// If update column pruning drops tracked columns, mlog writing would fail.
@@ -834,7 +860,7 @@ func TestMLogOnlineDDLAddUntrackedColumn(t *testing.T) {
 	tk.MustExec("create table t (id int primary key, tracked int, untracked int)")
 	tk.MustExec("create materialized view log on t (id, tracked)")
 	tk.MustExec("insert into t values (1, 10, 100)")
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 
 	tkDDL := testkit.NewTestKit(t, store)
 	tkDDL.MustExec("use test")
@@ -877,7 +903,7 @@ func TestMLogOnlineDDLDropUntrackedColumn(t *testing.T) {
 	tk.MustExec("create table t (id int primary key, to_drop int, tracked int)")
 	tk.MustExec("create materialized view log on t (id, tracked)")
 	tk.MustExec("insert into t values (1, 100, 10)")
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 
 	tkDDL := testkit.NewTestKit(t, store)
 	tkDDL.MustExec("use test")
@@ -922,7 +948,7 @@ func TestMLogOnlineDDLDropTrackedColumnCurrentBehavior(t *testing.T) {
 	tk.MustExec("create table t (id int primary key, tracked int, untracked int)")
 	tk.MustExec("create materialized view log on t (id, tracked)")
 	tk.MustExec("insert into t values (1, 10, 100)")
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 
 	tkDDL := testkit.NewTestKit(t, store)
 	tkDDL.MustExec("use test")
@@ -987,7 +1013,7 @@ func TestMLogGeneratedColumn(t *testing.T) {
 		"1 10 30 I 1",
 	))
 
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("update t set b=11 where a=1")
 	tk.MustQuery(
 		"select a, b, d, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -1013,7 +1039,7 @@ func TestMLogVirtualGeneratedColumn(t *testing.T) {
 		"1 10 30 I 1",
 	))
 
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("update t set b=11 where a=1")
 	tk.MustQuery(
 		"select a, b, d, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -1041,7 +1067,7 @@ func TestMLogAutoIncrement(t *testing.T) {
 		"2 20 I 1",
 	))
 
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("delete from t where a=1")
 	tk.MustQuery(
 		"select a, b, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -1050,7 +1076,7 @@ func TestMLogAutoIncrement(t *testing.T) {
 	))
 
 	// REPLACE with auto-increment PK conflict.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("replace into t values (2, 21)")
 	tk.MustQuery(
 		"select a, b, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",
@@ -1060,7 +1086,7 @@ func TestMLogAutoIncrement(t *testing.T) {
 	))
 
 	// REPLACE with new auto-increment allocation.
-	tk.MustExec("delete from `$mlog$t`")
+	execAsMLogPurge(tk, "delete from `$mlog$t`")
 	tk.MustExec("replace into t (b) values (30)")
 	tk.MustQuery(
 		"select b, `_MLOG$_DML_TYPE`, `_MLOG$_OLD_NEW` from `$mlog$t`",

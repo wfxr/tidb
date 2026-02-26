@@ -1092,6 +1092,7 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	// pushing them down to TiKV as flags.
 
 	sc.InRestrictedSQL = vars.InRestrictedSQL
+	sc.MViewInternalDML = vars.MViewInternalDML
 	strictSQLMode := vars.SQLMode.HasStrictMode()
 
 	errLevels := sc.ErrLevels()

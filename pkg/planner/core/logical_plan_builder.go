@@ -5772,6 +5772,9 @@ func (b *PlanBuilder) buildUpdateLists(ctx context.Context, tableList []*ast.Tab
 				if isCTE(tlW) || tlW.TableInfo.IsView() || tlW.TableInfo.IsSequence() {
 					return nil, nil, false, plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(name.TblName.O, "UPDATE")
 				}
+				if err := checkMViewUpdatable(b.ctx, tlW.TableInfo, name.TblName.O, "UPDATE"); err != nil {
+					return nil, nil, false, err
+				}
 				foundListItem = true
 			}
 		}
@@ -6065,6 +6068,9 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 				DBInfo:    tnW.DBInfo,
 			})
 			tableInfo := tnW.TableInfo
+			if err := checkMViewUpdatable(b.ctx, tableInfo, tn.Name.O, "DELETE"); err != nil {
+				return nil, err
+			}
 			if tableInfo.IsView() {
 				return nil, errors.Errorf("delete view %s is not supported now", tn.Name.O)
 			}
@@ -6090,6 +6096,9 @@ func (b *PlanBuilder) buildDelete(ctx context.Context, ds *ast.DeleteStmt) (base
 			}
 			if tblW.TableInfo.IsSequence() {
 				return nil, errors.Errorf("delete sequence %s is not supported now", v.Name.O)
+			}
+			if err := checkMViewUpdatable(b.ctx, tblW.TableInfo, v.Name.O, "DELETE"); err != nil {
+				return nil, err
 			}
 			dbName := v.Schema.L
 			if dbName == "" {

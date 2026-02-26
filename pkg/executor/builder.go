@@ -1066,6 +1066,10 @@ func (b *executorBuilder) buildImportInto(v *plannercore.ImportInto) exec.Execut
 		b.err = plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tbl.Meta().Name.O, "IMPORT")
 		return nil
 	}
+	if err := checkMViewUpdatable(b.ctx, tbl.Meta(), "IMPORT"); err != nil {
+		b.err = err
+		return nil
+	}
 	if meta := tbl.Meta(); meta.MaterializedViewBase != nil &&
 		meta.MaterializedViewBase.MLogID != 0 {
 		b.err = plannererrors.ErrNotSupportedYet.GenWithStackByArgs(
@@ -1105,6 +1109,9 @@ func (b *executorBuilder) buildLoadData(v *plannercore.LoadData) exec.Executor {
 		b.err = plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tbl.Meta().Name.O, "LOAD")
 		return nil
 	}
+	if b.err = checkMViewUpdatable(b.ctx, tbl.Meta(), "LOAD"); b.err != nil {
+		return nil
+	}
 	tbl = b.wrapTableWithMLogIfExists(tbl, tables.MLogSourceLoadData)
 	if b.err != nil {
 		return nil
@@ -1122,6 +1129,20 @@ func (b *executorBuilder) buildLoadData(v *plannercore.LoadData) exec.Executor {
 		loadDataWorker: worker,
 		FileLocRef:     v.FileLocRef,
 	}
+}
+
+func checkMViewUpdatable(ctx sessionctx.Context, tblMeta *model.TableInfo, op string) error {
+	if tblMeta == nil {
+		return nil
+	}
+	sc := ctx.GetSessionVars().StmtCtx
+	if tblMeta.MaterializedView != nil && !sc.AllowExplicitWriteToMaterializedView() {
+		return plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tblMeta.Name.O, op)
+	}
+	if tblMeta.MaterializedViewLog != nil && !sc.AllowExplicitWriteToMaterializedViewLog() {
+		return plannererrors.ErrNonUpdatableTable.GenWithStackByArgs(tblMeta.Name.O, op)
+	}
+	return nil
 }
 
 func (b *executorBuilder) buildLoadStats(v *plannercore.LoadStats) exec.Executor {

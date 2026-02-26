@@ -212,6 +212,21 @@ func (s *stmtCache) reset() *stmtCache {
 	return s
 }
 
+// MViewInternalDML indicates whether the current statement is executed as an internal
+// maintenance operation for materialized view / materialized view log.
+//
+// It is used to gate user-visible DML on MV/MV log tables.
+type MViewInternalDML uint8
+
+const (
+	// MViewInternalDMLNone indicates no special allowance for MV/MV log tables.
+	MViewInternalDMLNone MViewInternalDML = iota
+	// MViewInternalDMLRefresh indicates the statement is executed as part of MV refresh.
+	MViewInternalDMLRefresh
+	// MViewInternalDMLPurge indicates the statement is executed as part of MV log purge.
+	MViewInternalDMLPurge
+)
+
 // StatementContext contains variables for a statement.
 // It should be reset before executing a statement.
 type StatementContext struct {
@@ -281,7 +296,10 @@ type StatementContext struct {
 	// in stmtCtx
 	IsStaleness     bool
 	InRestrictedSQL bool
-	ViewDepth       int32
+	// MViewInternalDML indicates whether the current statement is an internal maintenance operation
+	// for materialized view / materialized view log. It is used to gate explicit DML on MV/MV log tables.
+	MViewInternalDML MViewInternalDML
+	ViewDepth        int32
 	// mu struct holds variables that change during execution.
 	mu *stmtCtxMu
 
@@ -567,6 +585,16 @@ func (sc *StatementContext) Reset() bool {
 		sc.ExtraWarnHandler = contextutil.NewStaticWarnHandler(0)
 	}
 	return true
+}
+
+// AllowExplicitWriteToMaterializedView returns whether explicit DML on materialized view tables is allowed.
+func (sc *StatementContext) AllowExplicitWriteToMaterializedView() bool {
+	return sc != nil && sc.MViewInternalDML == MViewInternalDMLRefresh
+}
+
+// AllowExplicitWriteToMaterializedViewLog returns whether explicit DML on materialized view log tables is allowed.
+func (sc *StatementContext) AllowExplicitWriteToMaterializedViewLog() bool {
+	return sc != nil && sc.MViewInternalDML == MViewInternalDMLPurge
 }
 
 // CtxID returns the context id of the statement

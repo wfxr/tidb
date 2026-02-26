@@ -859,6 +859,10 @@ type SessionVars struct {
 	// InRestrictedSQL indicates if the session is handling restricted SQL execution.
 	InRestrictedSQL bool
 
+	// MViewInternalDML indicates whether statements are executed as internal maintenance operations for
+	// materialized view / materialized view log. It will be copied into StmtCtx at statement start.
+	MViewInternalDML stmtctx.MViewInternalDML
+
 	// SnapshotTS is used for reading history data. For simplicity, SnapshotTS only supports distsql request.
 	SnapshotTS uint64
 
