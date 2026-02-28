@@ -64,8 +64,8 @@ Behavior:
    - allow when `InRestrictedSQL == true`;
    - otherwise return existing internal error (same invariant as `CheckMViewUpdatable`).
 3. Map lock type to operation string:
-   - `FOR UPDATE`, `FOR UPDATE NOWAIT`, `FOR UPDATE WAIT N` -> `SELECT FOR UPDATE`
-   - `FOR SHARE`, `FOR SHARE NOWAIT` -> `SELECT FOR SHARE`
+   - `FOR UPDATE`, `FOR UPDATE NOWAIT`, `FOR UPDATE WAIT N`, `FOR UPDATE SKIP LOCKED` -> `SELECT FOR UPDATE`
+   - `FOR SHARE`, `FOR SHARE NOWAIT`, `FOR SHARE SKIP LOCKED` -> `SELECT FOR SHARE`
    - other lock types -> `nil`
 4. Determine table kind string:
    - `materialized view`
@@ -83,6 +83,11 @@ Suggested message template:
 ```text
 %s is not supported on %s table %-.100s
 ```
+
+Formatting note:
+
+- Keep `%-.100s` to align with existing MySQL/TiDB error templates.
+- This template is rendered through TiDB's standard SQL error formatting path (ultimately using `fmt.Sprintf`), so string precision truncation is preserved.
 
 Arguments:
 
@@ -104,6 +109,7 @@ In `buildSelectLock` (before constructing `LogicalLock`):
 
 - If `lock.Tables` is empty:
   - check all actually lockable table IDs from `b.handleHelper.tailMap()` by resolving `TableInfo` from infoschema.
+  - API choice: use `b.is.TableInfoByID(tableID)` (metadata-only lookup), not `TableByID`.
 - If `lock.Tables` is non-empty (e.g. `FOR UPDATE OF ...`):
   - Try resolving each target via `resolveCtx.GetTableName`.
   - Collect `resolvedIDs` and `unresolvedCount`.
@@ -158,8 +164,12 @@ Add cases for MV and MLog:
 - `FOR UPDATE`
 - `FOR UPDATE NOWAIT`
 - `FOR UPDATE WAIT N`
+- `FOR UPDATE SKIP LOCKED` (lock-intent variant regression guard)
 - `FOR SHARE NOWAIT` (explicit lock-type mapping regression guard)
-- `FOR SHARE` / `LOCK IN SHARE MODE` under noop-enabled setting (to ensure lockability error is reached)
+- `FOR SHARE SKIP LOCKED` (lock-intent variant regression guard)
+- `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=ON` (should reach `CheckMViewLockable` and return 8040)
+- `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=OFF` (noop error should trigger first)
+- `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=WARN` (append warning, then return 8040)
 - point-get shape (`pk = const`) and batch-point-get shape (`pk in (...)`) with `FOR UPDATE`
 - prepared execution path (`prepare` + `execute`) for lock reads
 - `FOR UPDATE OF ...` selective-lock cases:
@@ -167,6 +177,9 @@ Add cases for MV and MLog:
   - resolved-only case: `OF` contains resolved MV alias (must fail with 8040)
   - mixed case: `OF` contains resolved base alias + unresolved alias, with MV present in `FROM` but not in resolved set (must not fail with 8040)
   - all-unresolved case: `OF` targets are all unresolved aliases and underlying lockable set contains MV/MLog (must fail with 8040 via fallback)
+- CTE / subquery boundary cases:
+  - `WITH cte AS (SELECT * FROM mv_or_mlog) SELECT * FROM cte FOR UPDATE` should be covered explicitly.
+  - Do not rely on structural assumptions about CTE handle propagation; use test to validate whether lockability check can still observe underlying MV/MLog access.
 
 Expected: lock reads on MV/MLog fail with code 8040 and lock-specific message.
 
