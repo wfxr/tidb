@@ -30,7 +30,10 @@ This can conflict with `REFRESH MATERIALIZED VIEW` (which runs in pessimistic tr
 
 - New helper name: `CheckMViewLockable`.
 - Locking-read errors use code **8040** (`ErrUnsupportedOp`) with custom message, instead of reusing 1288.
+- The lockability check applies only to **explicit SELECT locking reads** (user SQL with lock syntax).
+  Internal lock injection used by `UPDATE`/`DELETE` pessimistic optimization must keep existing DML behavior.
 - Fast paths do not throw directly; they fallback to normal planning and let the normal lock path return the final planner error.
+- Lock-type to operation mapping is centralized in one helper and must include `... SKIP LOCKED` variants.
 
 ## Public behavior change
 
@@ -39,6 +42,7 @@ For MV and MLog tables, locking reads return 8040 with explicit message, e.g. lo
 Notes:
 
 - `FOR SHARE` / `LOCK IN SHARE MODE` still obey existing noop-function gate behavior. If noop mode blocks first, existing noop error behavior remains unchanged.
+- Internal lock injection for `UPDATE`/`DELETE` pessimistic optimization is out of scope for this 8040 path; existing DML reject semantics remain unchanged.
 
 ## Proposed code changes
 
@@ -63,7 +67,7 @@ Behavior:
 2. If in MV maintenance mode:
    - allow when `InRestrictedSQL == true`;
    - otherwise return existing internal error (same invariant as `CheckMViewUpdatable`).
-3. Map lock type to operation string:
+3. Map lock type to operation string (single source of truth; reused by normal path and fast path):
    - `FOR UPDATE`, `FOR UPDATE NOWAIT`, `FOR UPDATE WAIT N`, `FOR UPDATE SKIP LOCKED` -> `SELECT FOR UPDATE`
    - `FOR SHARE`, `FOR SHARE NOWAIT`, `FOR SHARE SKIP LOCKED` -> `SELECT FOR SHARE`
    - other lock types -> `nil`
@@ -103,9 +107,27 @@ so error-code consistency tests include this new planner error.
 
 ### 3) Enforce check in normal lock path
 
-**File:** `pkg/planner/core/planbuilder.go`
+**Files:** `pkg/planner/core/logical_plan_builder.go`, `pkg/planner/core/planbuilder.go`
 
-In `buildSelectLock` (before constructing `LogicalLock`):
+Add a pre-check step for **SELECT statement lock syntax path** (the path where `sel.LockInfo` is handled),
+before constructing `LogicalLock`.
+
+Important scope guard:
+
+- Do **not** apply this check to internal/synthetic lock insertion used by `UPDATE`/`DELETE`
+  (`buildUpdate`/`buildDelete` calling `buildSelectLock(..., FOR UPDATE)` for optimization).
+- This preserves existing DML reject semantics (`CheckMViewUpdatable`, error 1288) and avoids behavior drift.
+
+For explicit SELECT lock checks:
+
+Decision flow (explicit SELECT lock syntax only):
+
+| Condition | Tables to check | Why |
+| --- | --- | --- |
+| `lock.Tables` is empty | all lockable table IDs from `b.handleHelper.tailMap()` | matches the lock scope of regular locking read |
+| `lock.Tables` is non-empty and any targets resolve | only `resolvedIDs` | execution uses `LockTableIDs` to limit lock scope to resolved targets |
+| `lock.Tables` is non-empty, none resolve, and `unresolvedCount > 0` | fallback to all lockable table IDs from `b.handleHelper.tailMap()` | fail-closed to avoid bypass via unresolvable `OF` targets |
+| lock type does not map to lock-read operation string | skip MV/MLog lockability check | no locking-read semantics to reject |
 
 - If `lock.Tables` is empty:
   - check all actually lockable table IDs from `b.handleHelper.tailMap()` by resolving `TableInfo` from infoschema.
@@ -130,12 +152,18 @@ Apply lockability check in both:
 - `tryPointGetPlan(...)`
 - `tryWhereIn2BatchPointGet(...)`
 
-When lock type is a supported lock-read type and the target is MV/MLog:
+When `selStmt.LockInfo` exists and lock type maps to a lock-read operation string
+(`SELECT FOR UPDATE` or `SELECT FOR SHARE`, including `... SKIP LOCKED`) and target is MV/MLog:
 
 - call `CheckMViewLockable(...)`;
 - if it returns error, return `nil` from fast-path builder, so planner falls back to normal path and reports the same final error there.
 
 This preserves fast-path function contract and avoids introducing new error plumbing.
+
+Implementation note:
+
+- Do not gate this with `logicalop.IsSupportedSelectLockType`, because current helper does not include `SKIP LOCKED`.
+- Reuse the same lock-type mapper used by `CheckMViewLockable` to avoid divergence.
 
 ## Test plan
 
@@ -162,6 +190,7 @@ This preserves fast-path function contract and avoids introducing new error plum
 Add cases for MV and MLog:
 
 - `FOR UPDATE`
+- `FOR SHARE`
 - `FOR UPDATE NOWAIT`
 - `FOR UPDATE WAIT N`
 - `FOR UPDATE SKIP LOCKED` (lock-intent variant regression guard)
@@ -170,16 +199,30 @@ Add cases for MV and MLog:
 - `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=ON` (should reach `CheckMViewLockable` and return 8040)
 - `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=OFF` (noop error should trigger first)
 - `LOCK IN SHARE MODE` + `tidb_enable_noop_functions=WARN` (append warning, then return 8040)
-- point-get shape (`pk = const`) and batch-point-get shape (`pk in (...)`) with `FOR UPDATE`
+- point-get shape (`pk = const`) and batch-point-get shape (`pk in (...)`) with:
+  - `FOR UPDATE`
+  - `FOR UPDATE SKIP LOCKED`
+  - `FOR SHARE SKIP LOCKED`
 - prepared execution path (`prepare` + `execute`) for lock reads
 - `FOR UPDATE OF ...` selective-lock cases:
-  - resolved-only case: `OF` only contains resolved base-table alias while MV is also present in `FROM` (must not fail with 8040)
-  - resolved-only case: `OF` contains resolved MV alias (must fail with 8040)
-  - mixed case: `OF` contains resolved base alias + unresolved alias, with MV present in `FROM` but not in resolved set (must not fail with 8040)
-  - all-unresolved case: `OF` targets are all unresolved aliases and underlying lockable set contains MV/MLog (must fail with 8040 via fallback)
+  - resolved-only base alias (must not fail with 8040), e.g.
+    `SELECT * FROM base b JOIN mv m ON ... FOR UPDATE OF b`
+  - resolved-only MV alias (must fail with 8040), e.g.
+    `SELECT * FROM base b JOIN mv m ON ... FOR UPDATE OF m`
+  - mixed resolved + unresolved (`resolvedIDs` non-empty; unresolved ignored), e.g.
+    `SELECT * FROM base b JOIN mv m ON ... FOR UPDATE OF b, missing_alias`
+    (must not fail with 8040 when MV/MLog alias is not in resolved set)
+  - all-unresolved (`resolvedIDs` empty; fallback to all lockable IDs), e.g.
+    `SELECT * FROM base b JOIN mv m ON ... FOR UPDATE OF missing_alias`
+    (must fail with 8040 via fallback)
 - CTE / subquery boundary cases:
   - `WITH cte AS (SELECT * FROM mv_or_mlog) SELECT * FROM cte FOR UPDATE` should be covered explicitly.
   - Do not rely on structural assumptions about CTE handle propagation; use test to validate whether lockability check can still observe underlying MV/MLog access.
+
+Add regression guard for DML semantics unchanged:
+
+- `UPDATE`/`DELETE` on MV/MLog in pessimistic mode should still fail through existing
+  `CheckMViewUpdatable` path (1288), not new 8040 lock-read error.
 
 Expected: lock reads on MV/MLog fail with code 8040 and lock-specific message.
 
@@ -200,7 +243,8 @@ make bazel_lint_changed
 
 ## Acceptance criteria
 
-1. Any locking read on MV/MLog is rejected consistently with 8040.
+1. Any MV/MLog locking read that reaches lockability check is rejected with 8040 (noop-function gate precedence cases excluded).
 2. No fast-path bypass remains.
 3. Base-table locking reads behave unchanged.
 4. Existing noop-function behavior precedence remains unchanged.
+5. `UPDATE`/`DELETE` on MV/MLog keep existing reject semantics (1288 via `CheckMViewUpdatable`).
