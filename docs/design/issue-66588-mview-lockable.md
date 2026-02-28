@@ -70,6 +70,7 @@ Behavior:
 3. Map lock type to operation string (single source of truth; reused by normal path and fast path):
    - `FOR UPDATE`, `FOR UPDATE NOWAIT`, `FOR UPDATE WAIT N`, `FOR UPDATE SKIP LOCKED` -> `SELECT FOR UPDATE`
    - `FOR SHARE`, `FOR SHARE NOWAIT`, `FOR SHARE SKIP LOCKED` -> `SELECT FOR SHARE`
+   - `LOCK IN SHARE MODE` is parsed as `FOR SHARE`, so it uses the same mapping.
    - other lock types -> `nil`
 4. Determine table kind string:
    - `materialized view`
@@ -85,7 +86,7 @@ Add a new error variable in planner errors, built from `mysql.ErrUnsupportedOp` 
 Suggested message template:
 
 ```text
-%s is not supported on %s table %-.100s
+%s is not supported on %s %-.100s
 ```
 
 Formatting note:
@@ -111,6 +112,11 @@ so error-code consistency tests include this new planner error.
 
 Add a pre-check step for **SELECT statement lock syntax path** (the path where `sel.LockInfo` is handled),
 before constructing `LogicalLock`.
+
+Execution order requirement:
+
+- This check must run after preprocess/noop-function gate handling.
+- For `LOCK IN SHARE MODE` under `tidb_enable_noop_functions=WARN`, warning is appended first by noop gate, then lockability check returns 8040 if target is MV/MLog.
 
 Important scope guard:
 
@@ -140,6 +146,7 @@ Decision flow (explicit SELECT lock syntax only):
   - If `resolvedIDs` is empty and `unresolvedCount > 0`:
     - run a fail-closed fallback check on all lockable table IDs from `b.handleHelper.tailMap()`.
     - This prevents bypass when all explicit lock targets are unresolvable to `TableInfo`.
+    - Keep this branch as defense-in-depth even if some unresolved `OF` forms may also be rejected earlier by other validation paths.
 
 For each checked target table, return error immediately on violation.
 
@@ -217,7 +224,14 @@ Add cases for MV and MLog:
     (must fail with 8040 via fallback)
 - CTE / subquery boundary cases:
   - `WITH cte AS (SELECT * FROM mv_or_mlog) SELECT * FROM cte FOR UPDATE` should be covered explicitly.
-  - Do not rely on structural assumptions about CTE handle propagation; use test to validate whether lockability check can still observe underlying MV/MLog access.
+  - Expected semantics are best-effort at lock scope: if lockability check can observe underlying MV/MLog table IDs, reject with 8040; otherwise, behavior follows observed lock scope.
+  - Do not rely on structural assumptions about CTE/subquery handle propagation; use tests to validate and pin current behavior.
+
+Plan cache interaction expectations:
+
+- Non-prepared plan cache path should not cache locking-read `SELECT` statements (existing behavior for `SelectStmt` with lock syntax).
+- Prepared plan cache may cache locking-read plans.
+- This check runs in planning/build path. A cache hit reuses an already-checked plan; schema/version changes for for-update read should trigger plan rebuild, then re-run checks.
 
 Add regression guard for DML semantics unchanged:
 
