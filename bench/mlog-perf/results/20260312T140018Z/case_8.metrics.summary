@@ -1,0 +1,6 @@
+tidb_cpu_avg_pct=21.0
+tikv_cpu_avg_pct=53.5
+tikv_prewrite_count=57861956
+tikv_commit_count=57861779
+tikv_disk_written_gb=124.05
+elapsed_secs=660.0

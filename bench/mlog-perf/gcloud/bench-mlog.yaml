@@ -1,0 +1,1046 @@
+resources:
+  - name: bench-mlog-pd-0-data
+    properties:
+      sizeGb: "64"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-pd-0
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-pd-0-data
+          source: $(ref.bench-mlog-pd-0-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-8
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-pd-0-data && mount-disk /dev/disk/by-id/google-bench-mlog-pd-0-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-pd-0-raft && mount-disk /dev/disk/by-id/google-bench-mlog-pd-0-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tiflash-0-data
+    properties:
+      sizeGb: "1024"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-tiflash-0
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-tiflash-0-data
+          source: $(ref.bench-mlog-tiflash-0-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-32
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tiflash-0-data && mount-disk /dev/disk/by-id/google-bench-mlog-tiflash-0-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tiflash-0-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tiflash-0-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tikv-0-data
+    properties:
+      sizeGb: "1024"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-tikv-0
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-tikv-0-data
+          source: $(ref.bench-mlog-tikv-0-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-highmem-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-0-data && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-0-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-0-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-0-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tikv-1-data
+    properties:
+      sizeGb: "1024"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-tikv-1
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-tikv-1-data
+          source: $(ref.bench-mlog-tikv-1-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-highmem-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-1-data && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-1-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-1-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-1-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tikv-2-data
+    properties:
+      sizeGb: "1024"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-tikv-2
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-tikv-2-data
+          source: $(ref.bench-mlog-tikv-2-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-highmem-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-2-data && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-2-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tikv-2-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tikv-2-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tidb-0
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-0-data && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-0-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-0-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-0-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tidb-1
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-1-data && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-1-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-1-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-1-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-tidb-2
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-16
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-2-data && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-2-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-tidb-2-raft && mount-disk /dev/disk/by-id/google-bench-mlog-tidb-2-raft /raft
+              install-commons
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance
+  - name: bench-mlog-load-data
+    properties:
+      sizeGb: "64"
+      type: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/diskTypes/hyperdisk-balanced
+      zone: us-east1-b
+    type: compute.v1.disk
+  - name: bench-mlog-load
+    properties:
+      disks:
+        - autoDelete: true
+          boot: true
+          deviceName: boot
+          initializeParams:
+            sourceImage: https://www.googleapis.com/compute/v1/projects/rocky-linux-cloud/global/images/rocky-linux-9-optimized-gcp-v20260115
+          type: PERSISTENT
+        - autoDelete: true
+          deviceName: bench-mlog-load-data
+          source: $(ref.bench-mlog-load-data.selfLink)
+          type: PERSISTENT
+      machineType: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/zones/us-east1-b/machineTypes/c4-standard-8
+      metadata:
+        items:
+          - key: startup-script
+            value: |
+              function install-commons() {
+                  dnf install -y --setopt=install_weak_deps=false epel-release
+                  dnf install -y --setopt=install_weak_deps=false git tig lnav tmux rsync numactl mysql bash-completion
+              }
+
+              function install-sysbench() {
+                  dnf -y install git make automake libtool pkgconfig libaio-devel openssl-devel
+                  dnf -y install mariadb-connector-c-devel
+
+                  git clone https://github.com/zyguan/sysbench.git /root/sysbench
+                  pushd /root/sysbench
+                  git checkout dev
+                  ./autogen.sh
+                  ./configure
+                  make -j
+                  make install
+                  popd
+              }
+
+              function install-sysbench-official() {
+                  dnf -y install sysbench
+              }
+
+              function install-jsonnet() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/go-jsonnet_0.20.0_Linux_x86_64.tar.gz /tmp/jsonnet.tar.gz
+                  tar -xf /tmp/jsonnet.tar.gz -C /usr/local/bin
+              }
+
+              function install-yq() {
+                  gsutil cp gs://oltp-bench-us-east5/tools/yq_linux_amd64.tar.gz /tmp/yq.tar.gz
+                  tar -xf /tmp/yq.tar.gz -C /usr/local/bin ./yq_linux_amd64
+                  mv /usr/local/bin/yq_linux_amd64 /usr/local/bin/yq
+              }
+
+              function mount-disk() {
+                  local disk=${1:-$([[ $(mount | grep 'on / type') == /dev/sda* ]] && echo /dev/sdb || echo /dev/sda)}
+                  local mount_point=${2:-/data}
+                  mkdir -p $mount_point
+                  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard $disk
+                  echo "$(blkid -o export $disk | grep UUID) $mount_point ext4 discard,defaults,noatime,nodelalloc 0 2" | tee -a /etc/fstab
+                  systemctl daemon-reload
+                  mount $disk
+              }
+
+              function install-auth-key() {
+                  gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa
+                  chmod 600 ~/.ssh/id_rsa
+              }
+
+              function install-app-key() {
+                  mkdir -p ~/.config/gcloud
+                  gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json
+              }
+
+              function install-tiup() {
+                  export HOME=/root
+                  export PATH=$HOME/.tiup/bin:$PATH
+                  curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+              }
+
+              function user-wait-creation() {
+                  while ! test -d /home/transaction/.ssh; do
+                      echo waiting user creation
+                      sleep 5
+                  done
+              }
+
+              function user-install-auth-key() {
+                  sudo -u transaction bash -c 'gcloud secrets versions access latest --secret=transaction-team-auth-key > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa'
+              }
+
+              function user-install-app-key() {
+                  sudo -u transaction bash -c 'mkdir -p ~/.config/gcloud; gcloud secrets versions access latest --secret=gs-cred-key > ~/.config/gcloud/application_default_credentials.json'
+              }
+
+              function user-install-tiup() {
+                  sudo -u transaction bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh'
+              }
+
+              # BOOTSTRAP
+              set -x
+              test -e /dev/disk/by-id/google-bench-mlog-load-data && mount-disk /dev/disk/by-id/google-bench-mlog-load-data /data
+              test -e /dev/disk/by-id/google-bench-mlog-load-raft && mount-disk /dev/disk/by-id/google-bench-mlog-load-raft /raft
+              install-commons
+              user-wait-creation
+              user-install-auth-key
+              user-install-app-key
+              user-install-tiup
+      networkInterfaces:
+        - accessConfigs:
+            - name: External NAT
+              type: ONE_TO_ONE_NAT
+          network: https://www.googleapis.com/compute/v1/projects/gcp-tikv-transaction-dev/global/networks/default
+      serviceAccounts:
+        - email: benchmark@gcp-tikv-transaction-dev.iam.gserviceaccount.com
+          scopes:
+            - https://www.googleapis.com/auth/cloud-platform
+      zone: us-east1-b
+    type: compute.v1.instance

@@ -1,0 +1,5 @@
+scenario=mlog
+mlog_shard=shard
+batch_size=1
+txn_mode=optimistic
+rate=0
