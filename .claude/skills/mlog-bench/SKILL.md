@@ -40,18 +40,18 @@ gcloud compute instances start \
 ```bash
 ./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load \
   "cd ~/bench/mlog-perf && nohup bash run_bench.sh \
-    --host 10.142.0.7 \
-    --priority ALL \
-    --target-row-rate 4000 \
+    --host 10.142.0.7,10.142.0.6,10.142.0.5 \
+    --target-row-rate 6500 \
     --threads 128 \
     > /tmp/bench.log 2>&1 & echo PID=\$!"
 ```
 
-**CRITICAL**: Always pass `--host <TiDB-IP>`. Default `127.0.0.1` won't work from the load machine.
+**CRITICAL**: Always pass `--host <TiDB-IPs>`. Default `127.0.0.1` won't work from the load machine. Use comma-separated IPs to distribute load across all TiDB nodes (sysbench round-robins connections).
 
 Key parameters:
-- `--priority P0|P1|P2|ALL` — which test cases to run
-- `--target-row-rate N` — required for P2 rate-limited cases
+- `--host IP[,IP,...]` — TiDB node(s); comma-separated for multi-node round-robin
+- `--cases N[,N,...]` — run only specific case IDs (e.g. `--cases 8,9`); omit to run all
+- `--target-row-rate N` — required for P2 rate-limited cases (cases 8,9)
 - `--threads N` — sysbench concurrency (default 128)
 - `--time N` — seconds per case (default 660 = 60s warmup + 600s measurement)
 

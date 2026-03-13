@@ -12,10 +12,10 @@ THREADS=128
 TIME=660
 REPORT_INTERVAL=10
 PERCENTILE=99
-PRIORITY="P0"
 TARGET_ROW_RATE=""
 OUTPUT_DIR=""
 CLUSTER="${CLUSTER:-bench-mlog}"
+CASE_FILTER=""   # comma-separated case IDs to run (empty = all)
 
 # ---------- test matrix ----------
 # format: "case_id:scenario:mlog_shard:batch_size:txn_mode:rate:priority"
@@ -45,10 +45,10 @@ parse_args() {
       --db)              TIDB_DB="$2";      shift 2 ;;
       --threads)         THREADS="$2";      shift 2 ;;
       --time)            TIME="$2";         shift 2 ;;
-      --priority)        PRIORITY=$(echo "$2" | tr '[:lower:]' '[:upper:]'); shift 2 ;;
       --target-row-rate) TARGET_ROW_RATE="$2"; shift 2 ;;
       --output-dir)      OUTPUT_DIR="$2";   shift 2 ;;
       --cluster)         CLUSTER="$2";      shift 2 ;;
+      --cases)           CASE_FILTER="$2";  shift 2 ;;
       *) echo "Unknown option: $1"; exit 1 ;;
     esac
   done
@@ -57,20 +57,23 @@ parse_args() {
 
 # ---------- helpers ----------
 
+# TIDB_ADMIN_HOST: set in main() after parse_args — first host for admin SQL
+TIDB_ADMIN_HOST=""
+
 # Execute SQL, return raw data (silent, no headers)
 mysql_query() {
-  mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+  mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
     -sN -e "$1" "$TIDB_DB" 2>/dev/null
 }
 
 # Execute SQL, keep formatted output
 mysql_exec() {
-  mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+  mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
     -e "$1" "$TIDB_DB" 2>/dev/null
 }
 
 setup_database() {
-  mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+  mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
     -e "DROP DATABASE IF EXISTS \`$TIDB_DB\`; CREATE DATABASE \`$TIDB_DB\`;" 2>/dev/null
 }
 
@@ -84,7 +87,7 @@ create_schema() {
     echo "SET SESSION tidb_wait_split_region_finish=1;"
     echo "SET SESSION tidb_wait_split_region_timeout=300;"
     cat "$SCRIPT_DIR/base_table.sql"
-  } | mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+  } | mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
       --comments "$TIDB_DB" 2>/dev/null
 
   # Mlog table: --comments preserves /*T! SHARD... */ hints for shard mode;
@@ -97,7 +100,7 @@ create_schema() {
       echo "SET SESSION tidb_wait_split_region_finish=1;"
       echo "SET SESSION tidb_wait_split_region_timeout=300;"
       cat "$SCRIPT_DIR/mlog.sql"
-    } | mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+    } | mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
         $comments_flag "$TIDB_DB" 2>/dev/null
   fi
 }
@@ -250,6 +253,11 @@ validate_case() {
 # ---------- main ----------
 main() {
   parse_args "$@"
+
+  # First host for admin SQL (DDL, validation) — all TiDB nodes share state.
+  # sysbench gets the full comma-separated list for round-robin distribution.
+  TIDB_ADMIN_HOST="${TIDB_HOST%%,*}"
+
   mkdir -p "$OUTPUT_DIR"
 
   # Discover cluster nodes for metrics collection
@@ -273,9 +281,8 @@ main() {
   for case_def in "${CASES[@]}"; do
     IFS=':' read -r case_id scenario mlog_shard batch_size txn_mode rate priority <<< "$case_def"
 
-    # Priority filter
-    if [[ "$PRIORITY" != "ALL" ]] && [[ "$priority" > "$PRIORITY" ]]; then
-      echo "[SKIP] Case #$case_id ($priority > $PRIORITY)"
+    # Case filter (--cases 8,9)
+    if [[ -n "$CASE_FILTER" ]] && [[ ! ",$CASE_FILTER," == *",$case_id,"* ]]; then
       continue
     fi
 

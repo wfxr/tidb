@@ -4,17 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------- defaults (overridable via env) ----------
-TIDB_HOST="${TIDB_HOST:-10.142.0.7}"
+TIDB_HOST="${TIDB_HOST:-10.142.0.7,10.142.0.6,10.142.0.5}"
 TIDB_PORT="${TIDB_PORT:-4000}"
 TIDB_USER="${TIDB_USER:-root}"
 TIDB_PASS="${TIDB_PASS:-}"
 TIDB_DB="${TIDB_DB:-mlog_bench}"
-THREAD_LIST=(32 64 128 256 512 1024)
+THREAD_LIST=(128 192 256 320 384 448 512)
 TIME=60
+
+# First host for admin SQL (DDL etc.) — all TiDB nodes share state
+TIDB_ADMIN_HOST="${TIDB_HOST%%,*}"
 
 # ---------- helpers ----------
 mysql_cmd() {
-  mysql -h"$TIDB_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} "$@"
+  mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} "$@"
 }
 
 setup_database() {
