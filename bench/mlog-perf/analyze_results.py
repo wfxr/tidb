@@ -104,6 +104,8 @@ def label(meta):
     """Human-readable scenario label."""
     if meta["scenario"] == "baseline":
         return "baseline"
+    if meta["scenario"] == "index":
+        return "index"
     return f"mlog-{meta['mlog_shard']}"
 
 
@@ -176,6 +178,7 @@ def main():
         }
 
     # Group by (batch_size, txn_mode, rate_category)
+    # First case in each group is the reference for overhead calculation
     groups = {}
     for cid, data in cases.items():
         gk = group_key(data["meta"])
@@ -186,49 +189,38 @@ def main():
             groups[gk]["mlog"].append(cid)
 
     # ---------- throughput summary table ----------
-    print("=" * 110)
+    print("=" * 90)
     print("THROUGHPUT SUMMARY")
-    print("=" * 110)
-    header = (f"{'Batch':>5} | {'TxnMode':<12} | {'RowRate':<10} | {'Baseline rows/s':>16} | "
-              f"{'Mlog-NoShard rows/s':>20} | {'OH%':>7} | {'Mlog-Shard rows/s':>18} | {'OH%':>7} | {'CV':>5}")
-    print(header)
-    print("-" * 110)
+    print("=" * 90)
+    print(f"  {'Case#':>5} | {'Scenario':<16} | {'rows/s':>12} | {'vs first':>10} | {'CV':>6}")
+    print(f"  {'-'*60}")
 
     for gk in sorted(groups.keys()):
         g = groups[gk]
         batch, txn, rate_cat = gk
-        bl_rows = "-"
+
+        # Collect all case IDs in this group (baseline first, then others sorted)
+        all_cids = []
         if g["baseline"] and g["baseline"] in cases:
-            bl_rows = f"{cases[g['baseline']]['rows_s']:.0f}"
+            all_cids.append(g["baseline"])
+        all_cids.extend(sorted(c for c in g["mlog"] if c in cases))
 
-        noshard_rows = "-"
-        noshard_oh = "-"
-        shard_rows = "-"
-        shard_oh = "-"
-        cv_str = "-"
+        if not all_cids:
+            continue
 
-        for mcid in g["mlog"]:
-            if mcid not in cases:
-                continue
-            mdata = cases[mcid]
-            mr = mdata["rows_s"]
-            cv_str = f"{mdata['cv']*100:.1f}%"
+        ref_rows_s = cases[all_cids[0]]["rows_s"]
+
+        for cid in all_cids:
+            d = cases[cid]
+            mr = d["rows_s"]
+            cv_str = f"{d['cv']*100:.1f}%"
             oh = ""
-            if g["baseline"] and g["baseline"] in cases:
-                bl_r = cases[g["baseline"]]["rows_s"]
-                oh_pct = (mr - bl_r) / bl_r * 100
-                oh = f"{oh_pct:+.1f}%"
-            if mdata["meta"]["mlog_shard"] == "noshard":
-                noshard_rows = f"{mr:.0f}"
-                noshard_oh = oh
-            else:
-                shard_rows = f"{mr:.0f}"
-                shard_oh = oh
+            if cid != all_cids[0] and ref_rows_s > 0:
+                oh = f"{(mr - ref_rows_s) / ref_rows_s * 100:+.1f}%"
+            lbl = label(d["meta"])
+            print(f"  {cid:>5} | {lbl:<16} | {mr:>12,.0f} | {oh:>10} | {cv_str:>6}")
 
-        print(
-            f"{batch:>5} | {txn:<12} | {rate_cat:<10} | {bl_rows:>16} | "
-            f"{noshard_rows:>20} | {noshard_oh:>7} | {shard_rows:>18} | {shard_oh:>7} | {cv_str:>5}"
-        )
+        print()
 
     # ---------- latency comparison table ----------
     print()
@@ -309,9 +301,18 @@ def main():
 
         for gk in sorted(groups.keys()):
             g = groups[gk]
-            if g["baseline"] is None or g["baseline"] not in cases:
+
+            # Collect all case IDs: baseline first, then others sorted
+            all_cids = []
+            if g["baseline"] and g["baseline"] in cases:
+                all_cids.append(g["baseline"])
+            all_cids.extend(sorted(c for c in g["mlog"] if c in cases))
+
+            if len(all_cids) < 2:
                 continue
-            bl = cases[g["baseline"]]
+
+            ref_cid = all_cids[0]
+            bl = cases[ref_cid]
             bl_met = bl["metrics"]
             if bl_met is None:
                 continue
@@ -323,9 +324,7 @@ def main():
             bl_disk_mb_s = bl_met.get("tikv_disk_written_gb", 0) * 1024 / bl_elapsed if bl_elapsed > 0 else 0
             bl_disk_kb_row = (bl_met.get("tikv_disk_written_gb", 0) * 1024 * 1024 / bl_total_rows) if bl_total_rows > 0 else 0
 
-            for mcid in sorted(g["mlog"]):
-                if mcid not in cases:
-                    continue
+            for mcid in all_cids[1:]:
                 md = cases[mcid]
                 mm = md["metrics"]
                 if mm is None:
@@ -338,7 +337,7 @@ def main():
                 m_disk_mb_s = mm.get("tikv_disk_written_gb", 0) * 1024 / m_elapsed if m_elapsed > 0 else 0
                 m_disk_kb_row = (mm.get("tikv_disk_written_gb", 0) * 1024 * 1024 / m_total_rows) if m_total_rows > 0 else 0
 
-                comp_label = f"#{g['baseline']} vs #{mcid} ({label(md['meta'])})"
+                comp_label = f"#{ref_cid} vs #{mcid} ({label(md['meta'])})"
 
                 tidb_oh = fmt_oh(mm.get("tidb_cpu_avg_pct", 0), bl_met.get("tidb_cpu_avg_pct", 0))
                 tikv_oh = fmt_oh(mm.get("tikv_cpu_avg_pct", 0), bl_met.get("tikv_cpu_avg_pct", 0))
@@ -382,10 +381,13 @@ def main():
             met = d["metrics"]
             gk = group_key(m)
             oh = ""
-            if m["scenario"] != "baseline" and gk in groups:
-                bl_cid = groups[gk]["baseline"]
-                if bl_cid and bl_cid in cases:
-                    bl_r = cases[bl_cid]["rows_s"]
+            if gk in groups:
+                # Use baseline if available, otherwise first case in group
+                ref_cid = groups[gk]["baseline"]
+                if ref_cid is None and groups[gk]["mlog"]:
+                    ref_cid = sorted(groups[gk]["mlog"])[0]
+                if ref_cid and ref_cid in cases and ref_cid != cid:
+                    bl_r = cases[ref_cid]["rows_s"]
                     oh = f"{(d['rows_s'] - bl_r) / bl_r * 100:.2f}"
             status = "PASS" if d["cv"] <= 0.10 else "WARN"
 

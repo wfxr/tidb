@@ -1,0 +1,1 @@
+CREATE MATERIALIZED VIEW LOG ON bc_bet_records (site_code, account, category_id, platform_id, game_id, currency, settle_day, settle_status, all_bet, valid_bet, net_profit) /*T! SHARD_ROW_ID_BITS=4 PRE_SPLIT_REGIONS=3 */;

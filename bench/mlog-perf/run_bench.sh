@@ -20,18 +20,14 @@ CASE_FILTER=""   # comma-separated case IDs to run (empty = all)
 # ---------- test matrix ----------
 # format: "case_id:scenario:mlog_shard:batch_size:txn_mode:rate:priority"
 CASES=(
-  # P0: core comparisons
-  "1:baseline:-:1:optimistic:0:P0"
-  "2:mlog:shard:1:optimistic:0:P0"
-  "3:mlog:noshard:1:optimistic:0:P0"
-  "4:baseline:-:10:optimistic:0:P0"
-  "5:mlog:shard:10:optimistic:0:P0"
-  # P1: pessimistic (requires pessimistic-auto-commit=true)
-  "6:baseline:-:1:pessimistic:0:P1"
-  "7:mlog:shard:1:pessimistic:0:P1"
-  # P2: rate-limited (requires --target-row-rate)
-  "8:baseline:-:1:optimistic:RATE_X:P2"
-  "9:mlog:shard:1:optimistic:RATE_X:P2"
+  # unlimited
+  "1:baseline:-:1:pessimistic:0:P0"
+  "2:index:-:1:pessimistic:0:P0"
+  "3:mlog:shard:1:pessimistic:0:P0"
+  # rate-limited 18000 rows/s
+  "4:baseline:-:1:pessimistic:18000:P0"
+  "5:index:-:1:pessimistic:18000:P0"
+  "6:mlog:shard:1:pessimistic:18000:P0"
 )
 
 # ---------- argument parsing ----------
@@ -89,6 +85,17 @@ create_schema() {
     cat "$SCRIPT_DIR/base_table.sql"
   } | mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
       --comments "$TIDB_DB" 2>/dev/null
+
+  # Non-unique index on mlog columns (for index vs mlog comparison)
+  if [[ "$scenario" == "index" ]]; then
+    mysql -h"$TIDB_ADMIN_HOST" -P"$TIDB_PORT" -u"$TIDB_USER" ${TIDB_PASS:+-p"$TIDB_PASS"} \
+      "$TIDB_DB" 2>/dev/null <<'EOSQL'
+ALTER TABLE bc_bet_records ADD KEY idx_mlog_cols (
+  site_code, account, category_id, platform_id, game_id, currency,
+  settle_day, settle_status, all_bet, valid_bet, net_profit
+);
+EOSQL
+  fi
 
   # Mlog table: --comments preserves /*T! SHARD... */ hints for shard mode;
   #             --skip-comments strips them for noshard mode
