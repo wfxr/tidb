@@ -4,13 +4,30 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------- defaults (overridable via env) ----------
-TIDB_HOST="${TIDB_HOST:-10.142.0.7,10.142.0.6,10.142.0.5}"
+TIDB_HOST="${TIDB_HOST:-}"
 TIDB_PORT="${TIDB_PORT:-4000}"
 TIDB_USER="${TIDB_USER:-root}"
 TIDB_PASS="${TIDB_PASS:-}"
 TIDB_DB="${TIDB_DB:-mlog_bench}"
+CLUSTER="${CLUSTER:-bench-mlog}"
 THREAD_LIST=(128 192 256 320 384 448 512)
 TIME=60
+
+# Auto-discover TiDB hosts from TiUP cluster if not specified
+if [[ -z "$TIDB_HOST" ]]; then
+  TIDB_HOST=$(~/.tiup/bin/tiup cluster display "$CLUSTER" --format json 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+hosts = sorted(set(i['host'] for i in d.get('instances', []) if i.get('role', '').split()[0] == 'tidb'))
+print(','.join(hosts))
+") || true
+  if [[ -z "$TIDB_HOST" ]]; then
+    echo "ERROR: Cannot discover TiDB hosts. Set TIDB_HOST or ensure tiup cluster '$CLUSTER' exists." >&2
+    exit 1
+  fi
+  echo "[DISCOVER] TiDB hosts: $TIDB_HOST"
+fi
 
 # First host for admin SQL (DDL etc.) — all TiDB nodes share state
 TIDB_ADMIN_HOST="${TIDB_HOST%%,*}"

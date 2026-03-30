@@ -9,17 +9,27 @@
 
 ## 节点列表
 
-| 角色 | 实例名 | 内网 IP | 机型 | 数据盘 |
-|---|---|---|---|---|
-| PD | bench-mlog-pd-0 | 10.142.0.11 | c4-standard-8 | 64GB hyperdisk-balanced → /data |
-| TiKV | bench-mlog-tikv-0 | 10.142.0.10 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
-| TiKV | bench-mlog-tikv-1 | 10.142.0.12 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
-| TiKV | bench-mlog-tikv-2 | 10.142.0.8 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
-| TiDB | bench-mlog-tidb-0 | 10.142.0.7 | c4-standard-16 | 无（系统盘） |
-| TiDB | bench-mlog-tidb-1 | 10.142.0.6 | c4-standard-16 | 无（系统盘） |
-| TiDB | bench-mlog-tidb-2 | 10.142.0.5 | c4-standard-16 | 无（系统盘） |
-| TiFlash | bench-mlog-tiflash-0 | 10.142.0.9 | c4-standard-32 | 1TB hyperdisk-balanced → /data |
-| 压测机 | bench-mlog-load | 10.142.0.13 | c4-standard-8 | 64GB hyperdisk-balanced → /data |
+| 角色 | 实例名 | 机型 | 数据盘 |
+|---|---|---|---|
+| PD | bench-mlog-pd-0 | c4-standard-8 | 64GB hyperdisk-balanced → /data |
+| TiKV | bench-mlog-tikv-0 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
+| TiKV | bench-mlog-tikv-1 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
+| TiKV | bench-mlog-tikv-2 | c4-highmem-16 | 1TB hyperdisk-balanced → /data |
+| TiDB | bench-mlog-tidb-0 | c4-standard-16 | 无（系统盘） |
+| TiDB | bench-mlog-tidb-1 | c4-standard-16 | 无（系统盘） |
+| TiDB | bench-mlog-tidb-2 | c4-standard-16 | 无（系统盘） |
+| TiFlash | bench-mlog-tiflash-0 | c4-standard-32 | 1TB hyperdisk-balanced → /data |
+| 压测机 | bench-mlog-load | c4-standard-8 | 64GB hyperdisk-balanced → /data |
+
+查看实际 IP：
+
+```bash
+# 查看所有实例内网 IP
+./gcloud/resolve-hosts.sh
+
+# 查看 TiUP 集群状态（含 IP）
+ssh bench-mlog-load "tiup cluster display bench-mlog"
+```
 
 ## 部署目录
 
@@ -28,44 +38,54 @@
 - deploy_dir: `/data/tidb-deploy`
 - data_dir: `/data/tidb-data`
 
-## 连接方式
+## SSH 配置
 
-### SSH
+首次使用运行一次 setup 脚本（拉取 SSH 密钥 + 配置 ~/.ssh/config）：
 
-使用 `gcloud/ssh.sh` 脚本：
+```bash
+./gcloud/setup-local.sh
+```
+
+配好后即可直接使用标准 SSH/SCP 命令：
 
 ```bash
 # 登录压测机（主要操作入口）
-./gcloud/ssh.sh bench-mlog-load
+ssh bench-mlog-load
 
 # 登录其他节点
-./gcloud/ssh.sh bench-mlog-pd-0
-./gcloud/ssh.sh bench-mlog-tikv-0
-./gcloud/ssh.sh bench-mlog-tidb-0
-./gcloud/ssh.sh bench-mlog-tiflash-0
+ssh bench-mlog-pd-0
+ssh bench-mlog-tikv-0
+ssh bench-mlog-tidb-0
+ssh bench-mlog-tiflash-0
 
 # 直接执行远程命令
-./gcloud/ssh.sh bench-mlog-load "tiup cluster display bench-mlog"
+ssh bench-mlog-load "tiup cluster display bench-mlog"
+
+# 上传文件
+scp -r ./bench bench-mlog-load:~/
 ```
 
 ### MySQL
 
-从压测机上连接 TiDB：
+从压测机上连接 TiDB（IP 从 tiup cluster display 获取）：
 
 ```bash
-mysql -h 10.142.0.7 -P 4000 -u root
-mysql -h 10.142.0.6 -P 4000 -u root
-mysql -h 10.142.0.5 -P 4000 -u root
+# 查看 TiDB 节点 IP
+tiup cluster display bench-mlog | grep tidb
+
+# 连接任一 TiDB 节点
+mysql -h <tidb-ip> -P 4000 -u root
 ```
 
 ### PD
 
 ```bash
-# Dashboard
-http://10.142.0.11:2379/dashboard
+# 查看 PD 节点 IP
+tiup cluster display bench-mlog | grep pd
 
+# Dashboard: http://<pd-ip>:2379/dashboard
 # pd-ctl
-tiup ctl:v8.5.4 pd -u http://10.142.0.11:2379
+tiup ctl:v8.5.4 pd -u http://<pd-ip>:2379
 ```
 
 ## 集群管理
@@ -108,18 +128,15 @@ tiup cluster patch bench-mlog tiflash-linux-amd64.tar.gz -R tiflash --overwrite 
 ```bash
 # 1. 修改配置（在压测机上执行）
 #    gcloud/edit_cfg.sh 会在拓扑 YAML 末尾追加 server_configs
-echo y | EDITOR=~/edit_cfg.sh tiup cluster edit-config bench-mlog
+echo y | EDITOR=~/bench/mlog-perf/gcloud/edit_cfg.sh tiup cluster edit-config bench-mlog
 
 # 2. 重载 TiDB 节点使配置生效
 tiup cluster reload bench-mlog -R tidb -y
 
 # 3. 验证所有 TiDB 节点已生效
-mysql -h 10.142.0.7 -P 4000 -u root -sN \
+mysql -h <tidb-ip> -P 4000 -u root -sN \
   -e "SHOW CONFIG WHERE name='pessimistic-txn.pessimistic-auto-commit';"
 # 预期输出：3 行均为 true
-# tidb  10.142.0.7:4000  pessimistic-txn.pessimistic-auto-commit  true
-# tidb  10.142.0.6:4000  pessimistic-txn.pessimistic-auto-commit  true
-# tidb  10.142.0.5:4000  pessimistic-txn.pessimistic-auto-commit  true
 ```
 
 ## 暂停 / 恢复 GCP 实例
@@ -146,7 +163,27 @@ gcloud compute instances start \
 tiup cluster start bench-mlog
 ```
 
-## 销毁
+## 创建 / 销毁集群
+
+### 创建
+
+```bash
+# 1. 创建 GCP 资源
+gcloud deployment-manager deployments create bench-mlog \
+  --config gcloud/bench-mlog.yaml --project gcp-tikv-transaction-dev
+
+# 2. 等待 VM 启动完成（约 2-3 分钟），然后生成 topology.yaml
+./gcloud/gen-topology.sh
+
+# 3. 上传 bench 目录到压测机
+scp -r ./bench bench-mlog-load:~/
+
+# 4. 在压测机上部署 TiUP 集群
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster deploy bench-mlog v8.5.4 ~/bench/mlog-perf/topology.yaml -y"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster start bench-mlog"
+```
+
+### 销毁
 
 ```bash
 # 1. 销毁 TiUP 集群（在压测机上）

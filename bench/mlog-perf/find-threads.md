@@ -24,7 +24,7 @@
 ```bash
 #!/usr/bin/env bash
 # find_threads.sh — 递增并发找写入瓶颈
-TIDB_HOST=${TIDB_HOST:-10.142.0.7}
+TIDB_HOST=${TIDB_HOST:-}  # auto-discovered from tiup cluster
 TIDB_PORT=4000
 TIDB_DB=mlog_bench
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -87,7 +87,7 @@ Threads |    TPS | P99(ms)
 
 ## 结果 R1（2026-03-12，单 TiDB 节点）
 
-sysbench 仅连接单个 TiDB 节点（`--mysql-host=10.142.0.7`），负载严重倾斜。
+sysbench 仅连接单个 TiDB 节点（`--mysql-host=<single-tidb-ip>`），负载严重倾斜。
 
 集群：3×TiDB c4-standard-16 + 3×TiKV c4-highmem-16 + 1×PD c4-standard-8
 
@@ -104,7 +104,7 @@ sysbench 仅连接单个 TiDB 节点（`--mysql-host=10.142.0.7`），负载严�
 
 ## 结果 R2（2026-03-13，三 TiDB 节点 round-robin）
 
-sysbench 连接全部 3 个 TiDB 节点（`--mysql-host=10.142.0.7,10.142.0.6,10.142.0.5`），连接按 round-robin 均匀分布。
+sysbench 连接全部 3 个 TiDB 节点（`--mysql-host=<tidb-ip-0>,<tidb-ip-1>,<tidb-ip-2>`），连接按 round-robin 均匀分布。
 
 集群：3×TiDB c4-standard-16 + 3×TiKV c4-highmem-16 + 1×PD c4-standard-8
 

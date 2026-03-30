@@ -1029,6 +1029,7 @@ resources:
               test -e /dev/disk/by-id/google-bench-mlog-load-data && mount-disk /dev/disk/by-id/google-bench-mlog-load-data /data
               test -e /dev/disk/by-id/google-bench-mlog-load-raft && mount-disk /dev/disk/by-id/google-bench-mlog-load-raft /raft
               install-commons
+              install-sysbench-official
               user-wait-creation
               user-install-auth-key
               user-install-app-key

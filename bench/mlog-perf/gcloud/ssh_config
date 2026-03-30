@@ -1,0 +1,16 @@
+# bench-mlog GCP cluster SSH config
+# Dynamically resolves NAT IP via gcloud on each connection.
+#
+# Setup: add this line to the TOP of ~/.ssh/config:
+#   Include /path/to/bench/mlog-perf/gcloud/ssh_config
+#
+# Then use standard SSH/SCP:
+#   ssh bench-mlog-load "tiup cluster display bench-mlog"
+#   scp -r ./bench bench-mlog-load:~/
+
+Host bench-mlog-*
+    User transaction
+    IdentityFile ~/.ssh/gcp-tikv-transaction-dev.pem
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ProxyCommand bash -c 'IP=$(gcloud compute instances describe %h --zone us-east1-b --project gcp-tikv-transaction-dev --format "get(networkInterfaces[0].accessConfigs[0].natIP)") && nc $IP 22'

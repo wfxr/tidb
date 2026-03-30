@@ -16,6 +16,7 @@ TARGET_ROW_RATE=""
 OUTPUT_DIR=""
 CLUSTER="${CLUSTER:-bench-mlog}"
 CASE_FILTER=""   # comma-separated case IDs to run (empty = all)
+DRY_RUN=false
 
 # ---------- test matrix ----------
 # format: "case_id:scenario:mlog_shard:batch_size:txn_mode:rate:priority"
@@ -49,6 +50,7 @@ parse_args() {
       --output-dir)      OUTPUT_DIR="$2";   shift 2 ;;
       --cluster)         CLUSTER="$2";      shift 2 ;;
       --cases)           CASE_FILTER="$2";  shift 2 ;;
+      --dry-run)         DRY_RUN=true;      shift ;;
       *) echo "Unknown option: $1"; exit 1 ;;
     esac
   done
@@ -254,20 +256,25 @@ validate_case() {
 main() {
   parse_args "$@"
 
+  # Auto-discover TiDB hosts from TiUP cluster if not specified
+  if [[ -z "$TIDB_HOST" ]]; then
+    TIDB_HOST=$(~/.tiup/bin/tiup cluster display "$CLUSTER" --format json 2>/dev/null \
+      | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+hosts = sorted(set(i['host'] for i in d.get('instances', []) if i.get('role', '').split()[0] == 'tidb'))
+print(','.join(hosts))
+") || true
+    if [[ -z "$TIDB_HOST" ]]; then
+      echo "ERROR: Cannot discover TiDB hosts. Use --host or ensure tiup cluster '$CLUSTER' exists." >&2
+      exit 1
+    fi
+    echo "[DISCOVER] TiDB hosts: $TIDB_HOST"
+  fi
+
   # First host for admin SQL (DDL, validation) — all TiDB nodes share state.
   # sysbench gets the full comma-separated list for round-robin distribution.
   TIDB_ADMIN_HOST="${TIDB_HOST%%,*}"
-
-  mkdir -p "$OUTPUT_DIR"
-
-  # Discover cluster nodes for metrics collection
-  NODES_FILE="$OUTPUT_DIR/nodes.json"
-  METRICS_ENABLED=true
-  if ! python3 "$SCRIPT_DIR/collect_metrics.py" discover \
-       --cluster "$CLUSTER" --output "$NODES_FILE"; then
-    echo "[WARN] Metrics collection disabled (cluster discovery failed)"
-    METRICS_ENABLED=false
-  fi
 
   # Pre-flight: check pessimistic-auto-commit once (only affects pessimistic cases)
   PESSIMISTIC_OK=false
@@ -275,8 +282,32 @@ main() {
     PESSIMISTIC_OK=true
   fi
 
-  # Snapshot config files into output dir
-  cp "$SCRIPT_DIR/base_table.sql" "$SCRIPT_DIR/mlog.sql" "$SCRIPT_DIR/mlog_insert.lua" "$OUTPUT_DIR/"
+  METRICS_ENABLED=false
+  if [[ "$DRY_RUN" != "true" ]]; then
+    mkdir -p "$OUTPUT_DIR"
+
+    # Discover cluster nodes for metrics collection
+    NODES_FILE="$OUTPUT_DIR/nodes.json"
+    METRICS_ENABLED=true
+    if ! python3 "$SCRIPT_DIR/collect_metrics.py" discover \
+         --cluster "$CLUSTER" --output "$NODES_FILE"; then
+      echo "[WARN] Metrics collection disabled (cluster discovery failed)"
+      METRICS_ENABLED=false
+    fi
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo ""
+    echo "[DRY-RUN] Configuration:"
+    echo "  TiDB hosts:  $TIDB_HOST"
+    echo "  Threads:     $THREADS"
+    echo "  Time:        ${TIME}s"
+    echo "  Cluster:     $CLUSTER"
+    echo "  Metrics:     $METRICS_ENABLED"
+    echo "  Pessimistic: $PESSIMISTIC_OK"
+    echo ""
+    echo "[DRY-RUN] Cases to run:"
+  fi
 
   for case_def in "${CASES[@]}"; do
     IFS=':' read -r case_id scenario mlog_shard batch_size txn_mode rate priority <<< "$case_def"
@@ -301,11 +332,21 @@ main() {
       continue
     fi
 
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  Case #$case_id: $scenario / shard=$mlog_shard / batch=$batch_size / txn=$txn_mode / rate=$rate"
+      continue
+    fi
+
     echo "=========================================="
     echo "Case #$case_id: $scenario / shard=$mlog_shard / batch=$batch_size / txn=$txn_mode / rate=$rate"
     echo "=========================================="
 
     write_metadata "$case_id" "$scenario" "$mlog_shard" "$batch_size" "$txn_mode" "$rate"
+
+    # Snapshot config files into output dir (once, on first case)
+    if [[ ! -f "$OUTPUT_DIR/base_table.sql" ]]; then
+      cp "$SCRIPT_DIR/base_table.sql" "$SCRIPT_DIR/mlog.sql" "$SCRIPT_DIR/mlog_insert.lua" "$OUTPUT_DIR/"
+    fi
 
     # Recreate database
     setup_database
@@ -336,8 +377,13 @@ main() {
     echo ""
   done
 
-  echo "[DONE] Results saved to $OUTPUT_DIR"
-  echo "Run: python3 $SCRIPT_DIR/analyze_results.py $OUTPUT_DIR"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo ""
+    echo "[DRY-RUN] Done. No benchmarks executed."
+  else
+    echo "[DONE] Results saved to $OUTPUT_DIR"
+    echo "Run: python3 $SCRIPT_DIR/analyze_results.py $OUTPUT_DIR"
+  fi
 }
 
 main "$@"

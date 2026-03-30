@@ -11,45 +11,68 @@ Infrastructure details: see [references/infra.md](references/infra.md).
 
 Bench scripts live in `bench/mlog-perf/` relative to the repo root.
 
+## Prerequisites
+
+First-time setup (one-off, requires `gcloud` CLI and `nc`):
+
+```bash
+cd bench/mlog-perf && ./gcloud/setup-local.sh
+```
+
+This fetches the SSH key from Secret Manager and configures `~/.ssh/config` so that `ssh bench-mlog-*` works directly.
+
 ## Full Benchmark Workflow
 
 ### 1. Start Infrastructure
 
+First check whether the GCP VMs and TiUP cluster exist:
+
 ```bash
-# Start GCP VMs
+gcloud compute instances list --filter="name~'^bench-mlog-'" \
+  --project gcp-tikv-transaction-dev --format="table(name,status)"
+```
+
+**If VMs exist** — start them and the TiUP cluster:
+
+```bash
 gcloud compute instances start \
   bench-mlog-pd-0 bench-mlog-tikv-{0,1,2} bench-mlog-tidb-{0,1,2} \
   bench-mlog-tiflash-0 bench-mlog-load \
   --zone us-east1-b --project gcp-tikv-transaction-dev
 
-# Wait ~60s for VMs to boot, then start TiUP cluster from load machine
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load "~/.tiup/bin/tiup cluster start bench-mlog"
+# Wait ~60s for VMs to boot, then start TiUP cluster
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster start bench-mlog"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster display bench-mlog | head -20"
+```
 
-# Verify cluster health
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load "mysql -h 10.142.0.7 -P 4000 -u root -sN -e 'SELECT version();'"
+**If VMs don't exist** — recreate the full cluster (see [Recreate Cluster](#recreate-cluster) below).
+
+Verify cluster health (TiDB hosts are auto-discovered by run_bench.sh):
+```bash
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster display bench-mlog | head -20"
 ```
 
 ### 2. Sync Scripts
 
 ```bash
-./bench/mlog-perf/gcloud/scp.sh bench-mlog-load ./bench '~/'
+scp -r ./bench bench-mlog-load:~/
 ```
 
 ### 3. Run Benchmark
 
 ```bash
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load \
+ssh bench-mlog-load \
   "cd ~/bench/mlog-perf && nohup bash run_bench.sh \
-    --host 10.142.0.7,10.142.0.6,10.142.0.5 \
     --target-row-rate 6500 \
     --threads 128 \
     > /tmp/bench.log 2>&1 & echo PID=\$!"
 ```
 
-**CRITICAL**: Always pass `--host <TiDB-IPs>`. Default `127.0.0.1` won't work from the load machine. Use comma-separated IPs to distribute load across all TiDB nodes (sysbench round-robins connections).
+TiDB hosts are auto-discovered from `tiup cluster display bench-mlog`. To override, pass `--host IP[,IP,...]`.
 
 Key parameters:
-- `--host IP[,IP,...]` — TiDB node(s); comma-separated for multi-node round-robin
+- `--dry-run` — verify config, show discovered hosts and case plan without executing
+- `--host IP[,IP,...]` — override TiDB node(s); omit to auto-discover from TiUP cluster
 - `--cases N[,N,...]` — run only specific case IDs (e.g. `--cases 8,9`); omit to run all
 - `--target-row-rate N` — required for P2 rate-limited cases (cases 8,9)
 - `--threads N` — sysbench concurrency (default 128)
@@ -61,11 +84,11 @@ Key parameters:
 
 ```bash
 # Summary view (cases completed + validation status)
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load \
+ssh bench-mlog-load \
   "grep -E '(^Case|^=|VALIDATE|METRICS|SKIP|DONE)' /tmp/bench.log"
 
 # Live TPS
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load "tail -5 /tmp/bench.log"
+ssh bench-mlog-load "tail -5 /tmp/bench.log"
 ```
 
 ### 5. Download Results
@@ -74,21 +97,13 @@ The results directory name is printed in the DONE line (e.g., `results/20260312T
 
 ```bash
 # Find the results directory name
-RESULTS_DIR=$(./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load \
+RESULTS_DIR=$(ssh bench-mlog-load \
   "grep 'Results saved' /tmp/bench.log" | grep -oP 'results/\S+')
 
-# Get just the directory name
 DIR_NAME=$(basename "$RESULTS_DIR")
 
-# Download via direct scp (resolve IP first)
-IP=$(gcloud compute instances describe bench-mlog-load \
-  --zone us-east1-b --project gcp-tikv-transaction-dev \
-  --format json | jq -r '.networkInterfaces[0].accessConfigs[0].natIP')
-
 mkdir -p bench/mlog-perf/results/$DIR_NAME
-scp -r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -i ~/.ssh/gcp-tikv-transaction-dev.pem \
-  "transaction@${IP}:~/bench/mlog-perf/${RESULTS_DIR}/*" \
+scp -r "bench-mlog-load:~/bench/mlog-perf/${RESULTS_DIR}/*" \
   bench/mlog-perf/results/$DIR_NAME/
 ```
 
@@ -122,8 +137,7 @@ Write `results/report-rN.md` based on the analysis output. Key sections:
 
 ```bash
 # Stop TiUP cluster first
-./bench/mlog-perf/gcloud/ssh.sh bench-mlog-load \
-  "~/.tiup/bin/tiup cluster stop bench-mlog -y"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster stop bench-mlog -y"
 
 # Then stop GCP VMs
 gcloud compute instances stop \
@@ -131,6 +145,48 @@ gcloud compute instances stop \
   bench-mlog-tiflash-0 bench-mlog-load \
   --zone us-east1-b --project gcp-tikv-transaction-dev
 ```
+
+## Recreate Cluster
+
+When the GCP VMs have been deleted, follow this procedure to recreate from scratch. The official TiDB release does not support `CREATE MATERIALIZED VIEW LOG`, so patching with feature-branch binaries is mandatory after every `tiup cluster deploy`.
+
+```bash
+# 1. Create GCP VMs via Deployment Manager
+gcloud deployment-manager deployments create bench-mlog \
+  --config gcloud/bench-mlog.yaml --project gcp-tikv-transaction-dev
+
+# 2. Setup local SSH config (fetches SSH key + configures ProxyCommand)
+cd bench/mlog-perf && ./gcloud/setup-local.sh
+
+# 3. Wait ~90s for startup scripts, then regenerate topology with new IPs
+./gcloud/gen-topology.sh
+
+# 4. Sync scripts to load machine
+cd <repo-root> && rsync -avz --exclude='results/' ./bench/mlog-perf/ bench-mlog-load:~/bench/mlog-perf/
+
+# 5. Deploy TiUP cluster (do NOT start — must patch first)
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster deploy bench-mlog v8.5.1 \
+  ~/bench/mlog-perf/topology.yaml --user transaction -y"
+
+# 6. Patch with feature-branch binaries (cluster is offline after deploy)
+ssh bench-mlog-load "gcloud storage cp 'gs://oltp-bench-us-east1/tmp/zwx/*.tar.gz' /tmp/"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster patch bench-mlog /tmp/tidb-linux-amd64.tar.gz -R tidb --overwrite --offline -y"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster patch bench-mlog /tmp/tikv-linux-amd64.tar.gz -R tikv --overwrite --offline -y"
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster patch bench-mlog /tmp/tiflash-linux-amd64.tar.gz -R tiflash --overwrite --offline -y"
+
+# 7. Start the patched cluster
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster start bench-mlog --init"
+# --init generates a random root password, printed in the output
+
+# 8. Reset root password to empty (bench scripts expect passwordless root)
+ssh bench-mlog-load "mysql -h <tidb-ip> -P 4000 -u root -p'<password>' \
+  -e \"ALTER USER 'root'@'%' IDENTIFIED BY '';\""
+
+# 9. Verify
+ssh bench-mlog-load "~/.tiup/bin/tiup cluster display bench-mlog | head -20"
+```
+
+Once patched, subsequent `tiup cluster start/stop` do not require re-patching.
 
 ## Test Cases Reference
 
