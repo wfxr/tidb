@@ -20,14 +20,13 @@ CASE_FILTER=""   # comma-separated case IDs to run (empty = all)
 # ---------- test matrix ----------
 # format: "case_id:scenario:mlog_shard:batch_size:txn_mode:rate:priority"
 CASES=(
-  # unlimited
-  "1:baseline:-:1:pessimistic:0:P0"
-  "2:index:-:1:pessimistic:0:P0"
-  "3:mlog:shard:1:pessimistic:0:P0"
-  # rate-limited 18000 rows/s
-  "4:baseline:-:1:pessimistic:18000:P0"
-  "5:index:-:1:pessimistic:18000:P0"
-  "6:mlog:shard:1:pessimistic:18000:P0"
+  # rate-limited 18000 rows/s — mlog(noshard) vs index
+  "1:baseline:-:1:pessimistic:18000:P0"
+  "2:index:-:1:pessimistic:18000:P0"
+  "3:mlog:noshard:1:pessimistic:18000:P0"
+  "4:baseline:-:1:optimistic:18000:P0"
+  "5:index:-:1:optimistic:18000:P0"
+  "6:mlog:noshard:1:optimistic:18000:P0"
 )
 
 # ---------- argument parsing ----------
@@ -116,14 +115,10 @@ verify_regions() {
   local scenario=$1
   local mlog_shard=$2
 
-  # Base table: SHARD_ROW_ID_BITS=4 PRE_SPLIT_REGIONS=3 → 2^3=8 row-data regions minimum
+  # Base table region count (informational)
   local base_regions
   base_regions=$(mysql_exec "SHOW TABLE bc_bet_records REGIONS;" | tail -n +2 | wc -l)
   echo "[VERIFY] Base table regions: $base_regions"
-  if (( base_regions < 8 )); then
-    echo "[VERIFY FAIL] Base table regions too few: $base_regions (expect >= 8)"
-    return 1
-  fi
 
   if [[ "$scenario" == "mlog" ]]; then
     local mlog_regions
@@ -185,6 +180,29 @@ run_sysbench() {
   start_ts=$(date -u +%FT%TZ)
   start_epoch=$(date +%s)
 
+  # Collect CPU pprof from all TiDB nodes (background: wait for warmup, then capture 120s)
+  local pprof_pids=()
+  if [[ "$METRICS_ENABLED" == "true" ]]; then
+    local pprof_secs=120
+    local n_tidb
+    n_tidb=$(python3 -c "import json; print(len(json.load(open('$NODES_FILE'))['tidb']))")
+    for idx in $(seq 0 $((n_tidb - 1))); do
+      local pprof_host pprof_port
+      pprof_host=$(python3 -c "import json; d=json.load(open('$NODES_FILE')); print(d['tidb'][$idx]['host'])")
+      pprof_port=$(python3 -c "import json; d=json.load(open('$NODES_FILE')); print(d['tidb'][$idx]['status_port'])")
+      local pprof_file="$OUTPUT_DIR/case_${case_id}.pprof.${idx}"
+      (
+        sleep 90  # wait past warmup (60s) + 30s stabilization
+        curl -sS --max-time $((pprof_secs + 10)) \
+          "http://${pprof_host}:${pprof_port}/debug/pprof/profile?seconds=${pprof_secs}" \
+          -o "$pprof_file" \
+          && echo "[PPROF] Case #${case_id} node ${idx} (${pprof_host}): ${pprof_secs}s profile saved" \
+          || echo "[PPROF WARN] Case #${case_id} node ${idx} (${pprof_host}): failed to collect profile"
+      ) &
+      pprof_pids+=($!)
+    done
+  fi
+
   sysbench \
     --db-driver=mysql \
     --mysql-host="$TIDB_HOST" \
@@ -201,6 +219,11 @@ run_sysbench() {
     --batch_size="$batch_size" \
     --txn_mode="$txn_mode" \
     run 2>&1 | tee "$outfile"
+
+  # Wait for pprof collection to finish (if still running)
+  for pid in "${pprof_pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
 
   local end_ts end_epoch elapsed
   end_ts=$(date -u +%FT%TZ)

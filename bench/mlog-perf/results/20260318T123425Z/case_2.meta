@@ -1,0 +1,5 @@
+scenario=index
+mlog_shard=-
+batch_size=1
+txn_mode=pessimistic
+rate=18000

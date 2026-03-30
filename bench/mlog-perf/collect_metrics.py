@@ -260,6 +260,9 @@ def cmd_snapshot(args):
         val = extract_metric(text, "tikv_grpc_msg_duration_seconds_count", {"type": "kv_commit"})
         if val is not None:
             lines.append(f"tikv {host} grpc_commit_count {val}")
+        val = extract_metric(text, "tikv_grpc_msg_duration_seconds_count", {"type": "kv_pessimistic_lock"})
+        if val is not None:
+            lines.append(f"tikv {host} grpc_pessimistic_lock_count {val}")
 
     # Node exporter for TiKV hosts: disk written bytes
     disk_device = nodes.get("disk_device")
@@ -324,16 +327,20 @@ def cmd_compute(args):
 
     prewrite_total = 0.0
     commit_total = 0.0
+    pessimistic_lock_total = 0.0
     for n in nodes["tikv"]:
         host = n["host"]
-        for metric, attr in [("grpc_prewrite_count", "prewrite"), ("grpc_commit_count", "commit")]:
+        for metric, attr in [("grpc_prewrite_count", "prewrite"), ("grpc_commit_count", "commit"),
+                              ("grpc_pessimistic_lock_count", "pessimistic_lock")]:
             key = ("tikv", host, metric)
             if key in before and key in after:
                 delta = after[key] - before[key]
                 if attr == "prewrite":
                     prewrite_total += delta
-                else:
+                elif attr == "commit":
                     commit_total += delta
+                else:
+                    pessimistic_lock_total += delta
 
     disk_written_bytes = 0.0
     for host in set(n["host"] for n in nodes["tikv"]):
@@ -363,6 +370,7 @@ def cmd_compute(args):
         f.write(f"tikv_cpu_avg_pct={tikv_cpu_avg:.1f}\n")
         f.write(f"tikv_prewrite_count={prewrite_total:.0f}\n")
         f.write(f"tikv_commit_count={commit_total:.0f}\n")
+        f.write(f"tikv_pessimistic_lock_count={pessimistic_lock_total:.0f}\n")
         f.write(f"tikv_disk_written_gb={disk_written_gb:.2f}\n")
         f.write(f"elapsed_secs={elapsed}\n")
 
@@ -370,8 +378,9 @@ def cmd_compute(args):
     print(f"[METRICS] Case #{args.case_id}:")
     print(f"  TiDB CPU avg: {tidb_cpu_avg:.1f}%  {tidb_info}")
     print(f"  TiKV CPU avg: {tikv_cpu_avg:.1f}%  {tikv_info}")
-    print(f"  TiKV prewrite RPCs: {prewrite_total:,.0f}")
-    print(f"  TiKV commit RPCs:   {commit_total:,.0f}")
+    print(f"  TiKV prewrite RPCs:        {prewrite_total:,.0f}")
+    print(f"  TiKV commit RPCs:          {commit_total:,.0f}")
+    print(f"  TiKV pessimistic lock RPCs: {pessimistic_lock_total:,.0f}")
     print(f"  TiKV disk written:  {disk_written_gb:.1f} GB")
 
 

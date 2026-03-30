@@ -249,14 +249,14 @@ def main():
     # ---------- cluster metrics table ----------
     if has_metrics:
         print()
-        print("=" * 130)
+        print("=" * 145)
         print("CLUSTER METRICS (per case)")
-        print("=" * 130)
+        print("=" * 145)
         print(f"{'Case#':>5} | {'Scenario':<14} | {'Batch':>5} | "
               f"{'TiDB CPU%':>9} | {'TiKV CPU%':>9} | "
-              f"{'Prewrite/s':>10} | {'Commit/s':>10} | "
+              f"{'Prewrite/s':>10} | {'Commit/s':>10} | {'PessLock/s':>10} | "
               f"{'Disk MB/s':>9} | {'Disk KB/row':>11}")
-        print("-" * 130)
+        print("-" * 145)
 
         for cid in sorted(cases.keys()):
             d = cases[cid]
@@ -265,7 +265,7 @@ def main():
             if met is None:
                 print(f"{cid:>5} | {label(m):<14} | {m['batch_size']:>5} | "
                       f"{'N/A':>9} | {'N/A':>9} | "
-                      f"{'N/A':>10} | {'N/A':>10} | "
+                      f"{'N/A':>10} | {'N/A':>10} | {'N/A':>10} | "
                       f"{'N/A':>9} | {'N/A':>11}")
                 continue
 
@@ -276,28 +276,30 @@ def main():
             tikv_cpu = met.get("tikv_cpu_avg_pct", 0)
             prewrite_cnt = met.get("tikv_prewrite_count", 0)
             commit_cnt = met.get("tikv_commit_count", 0)
+            pesslock_cnt = met.get("tikv_pessimistic_lock_count", 0)
             disk_gb = met.get("tikv_disk_written_gb", 0)
 
             prewrite_s = prewrite_cnt / elapsed if elapsed > 0 else 0
             commit_s = commit_cnt / elapsed if elapsed > 0 else 0
+            pesslock_s = pesslock_cnt / elapsed if elapsed > 0 else 0
             disk_mb_s = disk_gb * 1024 / elapsed if elapsed > 0 else 0
             disk_kb_row = (disk_gb * 1024 * 1024 / total_rows) if total_rows > 0 else 0
 
             print(f"{cid:>5} | {label(m):<14} | {m['batch_size']:>5} | "
                   f"{tidb_cpu:>8.1f}% | {tikv_cpu:>8.1f}% | "
-                  f"{prewrite_s:>10,.0f} | {commit_s:>10,.0f} | "
+                  f"{prewrite_s:>10,.0f} | {commit_s:>10,.0f} | {pesslock_s:>10,.0f} | "
                   f"{disk_mb_s:>9.1f} | {disk_kb_row:>11.2f}")
 
         # ---------- metrics overhead comparison ----------
         print()
-        print("=" * 130)
+        print("=" * 155)
         print("METRICS OVERHEAD (baseline vs mlog)")
-        print("=" * 130)
+        print("=" * 155)
         print(f"{'Comparison':<30} | "
               f"{'TiDB CPU OH%':>12} | {'TiKV CPU OH%':>12} | "
-              f"{'Prewrite/s OH%':>14} | {'Commit/s OH%':>13} | "
+              f"{'Prewrite/s OH%':>14} | {'Commit/s OH%':>13} | {'PessLock/s OH%':>14} | "
               f"{'Disk MB/s OH%':>13} | {'Disk KB/row OH%':>15}")
-        print("-" * 130)
+        print("-" * 155)
 
         for gk in sorted(groups.keys()):
             g = groups[gk]
@@ -321,6 +323,7 @@ def main():
             bl_total_rows = bl["total_rows"]
             bl_prewrite_s = bl_met.get("tikv_prewrite_count", 0) / bl_elapsed if bl_elapsed > 0 else 0
             bl_commit_s = bl_met.get("tikv_commit_count", 0) / bl_elapsed if bl_elapsed > 0 else 0
+            bl_pesslock_s = bl_met.get("tikv_pessimistic_lock_count", 0) / bl_elapsed if bl_elapsed > 0 else 0
             bl_disk_mb_s = bl_met.get("tikv_disk_written_gb", 0) * 1024 / bl_elapsed if bl_elapsed > 0 else 0
             bl_disk_kb_row = (bl_met.get("tikv_disk_written_gb", 0) * 1024 * 1024 / bl_total_rows) if bl_total_rows > 0 else 0
 
@@ -334,6 +337,7 @@ def main():
                 m_total_rows = md["total_rows"]
                 m_prewrite_s = mm.get("tikv_prewrite_count", 0) / m_elapsed if m_elapsed > 0 else 0
                 m_commit_s = mm.get("tikv_commit_count", 0) / m_elapsed if m_elapsed > 0 else 0
+                m_pesslock_s = mm.get("tikv_pessimistic_lock_count", 0) / m_elapsed if m_elapsed > 0 else 0
                 m_disk_mb_s = mm.get("tikv_disk_written_gb", 0) * 1024 / m_elapsed if m_elapsed > 0 else 0
                 m_disk_kb_row = (mm.get("tikv_disk_written_gb", 0) * 1024 * 1024 / m_total_rows) if m_total_rows > 0 else 0
 
@@ -343,12 +347,13 @@ def main():
                 tikv_oh = fmt_oh(mm.get("tikv_cpu_avg_pct", 0), bl_met.get("tikv_cpu_avg_pct", 0))
                 pw_oh = fmt_oh(m_prewrite_s, bl_prewrite_s)
                 cm_oh = fmt_oh(m_commit_s, bl_commit_s)
+                pl_oh = fmt_oh(m_pesslock_s, bl_pesslock_s)
                 dk_oh = fmt_oh(m_disk_mb_s, bl_disk_mb_s)
                 dkr_oh = fmt_oh(m_disk_kb_row, bl_disk_kb_row)
 
                 print(f"{comp_label:<30} | "
                       f"{tidb_oh:>12} | {tikv_oh:>12} | "
-                      f"{pw_oh:>14} | {cm_oh:>13} | "
+                      f"{pw_oh:>14} | {cm_oh:>13} | {pl_oh:>14} | "
                       f"{dk_oh:>13} | {dkr_oh:>15}")
 
     # ---------- write per-case timeseries CSV ----------
@@ -371,7 +376,7 @@ def main():
             "rate", "tps", "rows_s", "avg_lat_ms", "p99_lat_ms", "max_lat_ms",
             "cv", "overhead_pct", "status",
             "tidb_cpu_pct", "tikv_cpu_pct",
-            "prewrite_per_s", "commit_per_s",
+            "prewrite_per_s", "commit_per_s", "pessimistic_lock_per_s",
             "disk_mb_per_s", "disk_kb_per_row",
         ])
         for cid in sorted(cases.keys()):
@@ -392,7 +397,7 @@ def main():
             status = "PASS" if d["cv"] <= 0.10 else "WARN"
 
             # Compute per-second and per-row metrics
-            tidb_cpu = tikv_cpu = prewrite_s = commit_s = disk_mb_s = disk_kb_row = ""
+            tidb_cpu = tikv_cpu = prewrite_s = commit_s = pesslock_s = disk_mb_s = disk_kb_row = ""
             if met is not None:
                 elapsed = met.get("elapsed_secs", 1)
                 total_rows = d["total_rows"]
@@ -400,6 +405,7 @@ def main():
                 tikv_cpu = f"{met.get('tikv_cpu_avg_pct', 0):.1f}"
                 prewrite_s = f"{met.get('tikv_prewrite_count', 0) / elapsed:.0f}" if elapsed > 0 else ""
                 commit_s = f"{met.get('tikv_commit_count', 0) / elapsed:.0f}" if elapsed > 0 else ""
+                pesslock_s = f"{met.get('tikv_pessimistic_lock_count', 0) / elapsed:.0f}" if elapsed > 0 else ""
                 disk_gb = met.get("tikv_disk_written_gb", 0)
                 disk_mb_s = f"{disk_gb * 1024 / elapsed:.1f}" if elapsed > 0 else ""
                 disk_kb_row = f"{disk_gb * 1024 * 1024 / total_rows:.2f}" if total_rows > 0 else ""
@@ -416,7 +422,7 @@ def main():
                 oh,
                 status,
                 tidb_cpu, tikv_cpu,
-                prewrite_s, commit_s,
+                prewrite_s, commit_s, pesslock_s,
                 disk_mb_s, disk_kb_row,
             ])
 

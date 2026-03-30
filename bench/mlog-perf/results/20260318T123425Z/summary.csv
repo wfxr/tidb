@@ -1,0 +1,7 @@
+case_id,scenario,mlog_shard,batch_size,txn_mode,rate,tps,rows_s,avg_lat_ms,p99_lat_ms,max_lat_ms,cv,overhead_pct,status,tidb_cpu_pct,tikv_cpu_pct,prewrite_per_s,commit_per_s,pessimistic_lock_per_s,disk_mb_per_s,disk_kb_per_row
+1,baseline,-,1,pessimistic,18000,17997.66,17997.66,10.38,41.85,1290.55,0.0208,,PASS,36.0,24.9,34917,33863,34913,166.4,9.47
+2,index,-,1,pessimistic,18000,17991.86,17991.86,4.73,6.91,213.45,0.0027,-0.03,PASS,41.5,37.8,49853,48914,35022,311.7,17.74
+3,mlog,noshard,1,pessimistic,18000,17989.02,17989.02,4.77,7.98,115.88,0.0025,-0.05,PASS,43.6,34.5,52840,52837,52834,235.8,13.42
+4,baseline,-,1,optimistic,18000,17986.60,17986.60,3.38,4.65,222.35,0.0024,,PASS,30.3,19.3,34864,33766,16,170.5,9.71
+5,index,-,1,optimistic,18000,17996.27,17996.27,4.09,5.77,126.96,0.0024,0.05,PASS,35.7,31.3,50116,49416,1,297.6,16.94
+6,mlog,noshard,1,optimistic,18000,17998.11,17998.11,11.85,13.70,1500.40,0.0028,0.06,PASS,35.8,27.0,52899,52896,0,233.4,13.28
