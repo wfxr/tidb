@@ -3748,6 +3748,84 @@ func TestForShareUsesSharedLockAfterPrimarySelected(t *testing.T) {
 	tk4.MustExec("rollback")
 }
 
+func TestForShareLocksRowKeyAndBlocksNonUniqueIndexPath(t *testing.T) {
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk1 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk1.MustExec("use test")
+	tk2.MustExec("use test")
+
+	tk.MustExec("create table t (id int primary key, v int, key idx_v(v))")
+	tk.MustExec("insert into t values (1, 10), (2, 20)")
+	for _, testKit := range []*testkit.TestKit{tk, tk1, tk2} {
+		testKit.MustExec("set @@tidb_enable_noop_functions = 0")
+		testKit.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+		testKit.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+		testKit.MustExec("set innodb_lock_wait_timeout = 1")
+	}
+
+	tk.MustExec("begin pessimistic")
+	// Milestone-1 precondition for the shared-lock gate.
+	tk.MustQuery("select * from t where id = 1 for update").Check(testkit.Rows("1 10"))
+	tk.MustQuery("select * from t use index(idx_v) where v = 20 for share").Check(testkit.Rows("2 20"))
+
+	tbl := external.GetTableByName(t, tk, "test", "t")
+	idxInfo := tbl.Meta().FindIndexByName("idx_v")
+	require.NotNil(t, idxInfo)
+	// Keep explicit cache assertions for both index and row keys; SQL-level blocking behavior
+	// alone cannot distinguish row-only locking from row+non-unique-index-key locking.
+	idxKey, distinct, err := tablecodec.GenIndexKey(
+		tk.Session().GetSessionVars().StmtCtx.TimeZone(),
+		tbl.Meta(),
+		idxInfo,
+		tbl.Meta().ID,
+		[]types.Datum{types.NewIntDatum(20)},
+		kv.IntHandle(2),
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, distinct, "idx_v should stay non-unique")
+	_, ok := tk.Session().GetSessionVars().TxnCtx.GetKeyInPessimisticLockCache(idxKey)
+	require.True(t, ok, "non-unique index key should be present in pessimistic lock cache")
+
+	rowKey := tablecodec.EncodeRowKeyWithHandle(tbl.Meta().ID, kv.IntHandle(2))
+	_, ok = tk.Session().GetSessionVars().TxnCtx.GetKeyInPessimisticLockCache(rowKey)
+	require.True(t, ok, "row key should be present in pessimistic lock cache")
+
+	tk1.MustExec("begin pessimistic")
+	err = tk1.ExecToErr("select * from t use index(idx_v) where v = 20 for update wait 1")
+	require.ErrorContains(t, err, "Lock wait timeout exceeded")
+	tk1.MustExec("rollback")
+
+	tk2.MustExec("begin pessimistic")
+	err = tk2.ExecToErr("update t set v = v + 1 where id = 2")
+	require.ErrorContains(t, err, "Lock wait timeout exceeded")
+	tk2.MustExec("rollback")
+
+	tk.MustExec("rollback")
+}
+
+func TestForShareRequiresPrimaryInMilestone1(t *testing.T) {
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (id int primary key, v int, key idx_v(v))")
+	tk.MustExec("insert into t values (1, 10)")
+	tk.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+
+	tk.MustExec("begin pessimistic")
+	// Milestone-1 restriction: FOR SHARE cannot be the first lock in a pessimistic transaction.
+	// Force non-unique index access so this uses SelectLockExec and lockKeys.
+	err := tk.ExecToErr("select * from t use index(idx_v) where v = 10 for share")
+	require.ErrorContains(t, err, "milestone-1 restriction")
+	require.ErrorContains(t, err, "requires a prior non-shared primary key lock")
+	tk.MustExec("rollback")
+}
+
 func TestForShareWithPromotion(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)

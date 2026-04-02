@@ -124,6 +124,10 @@ const (
 	globalPanicMemoryExceed string = "Out Of Global Memory Limit!"
 	// globalPanicAnalyzeMemoryExceed represents the panic message when out of analyze memory limit.
 	globalPanicAnalyzeMemoryExceed string = "Out Of Global Analyze Memory Limit!"
+	// Milestone-1 guard in client-go: FOR SHARE cannot be the first pessimistic lock.
+	pessimisticSharedLockNeedsPrimaryErr = "pessimistic lock in share mode requires primary key to be selected"
+	// SQL-facing message keeps the milestone-1 restriction explicit and diagnosable.
+	forShareMilestone1RestrictionErr = "milestone-1 restriction: SELECT ... FOR SHARE requires a prior non-shared primary key lock in pessimistic transactions"
 )
 
 // globalPanicOnExceed panics when GlobalDisTracker storage usage exceeds storage quota.
@@ -417,8 +421,22 @@ func doLockKeys(ctx context.Context, se sessionctx.Context, lockCtx *tikvstore.L
 	var lockKeyStats *tikvutil.LockKeysDetails
 	ctx = context.WithValue(ctx, tikvutil.LockKeysDetailCtxKey, &lockKeyStats)
 	err = txn.LockKeys(tikvutil.SetSessionID(ctx, se.GetSessionVars().ConnectionID), lockCtx, keys...)
+	err = translateForShareMilestone1RestrictionErr(lockCtx, err)
 	if lockKeyStats != nil {
 		sctx.MergeLockKeysExecDetails(lockKeyStats)
+	}
+	return err
+}
+
+func translateForShareMilestone1RestrictionErr(lockCtx *tikvstore.LockCtx, err error) error {
+	if err == nil || lockCtx == nil || !lockCtx.InShareMode {
+		return err
+	}
+	// This translation intentionally targets the milestone-1 client-go guard only.
+	// Remove it once pure shared-lock transactions are supported and the guard is lifted.
+	causeErr := errors.Cause(err)
+	if causeErr != nil && causeErr.Error() == pessimisticSharedLockNeedsPrimaryErr {
+		return errors.Annotate(err, forShareMilestone1RestrictionErr)
 	}
 	return err
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/pingcap/kvproto/pkg/coprocessor"
@@ -132,4 +133,44 @@ func TestReplicaReadEffectScope(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestForShareSharedLockGateCannotUseReplicaRead(t *testing.T) {
+	defer config.RestoreFunc()()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.Performance.EnableAsyncBatchGet = false
+	})
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (id int primary key, v int, key idx_v(v))")
+	tk.MustExec("insert into t values (1, 10), (2, 20), (3, 30)")
+	tk.MustExec("set session tidb_replica_read = 'follower'")
+	tk.MustExec("set session tidb_enable_noop_functions = 'off'")
+	tk.MustExec("set session tidb_enable_shared_lock_promotion = 0")
+	tk.MustExec("set session tidb_enable_for_share_shared_lock = 1")
+
+	var checkedReqCnt atomic.Int64
+	interceptorCtx := interceptor.WithRPCInterceptor(context.Background(), interceptor.NewRPCInterceptor("for-share-shared-lock-gate", func(next interceptor.RPCInterceptorFunc) interceptor.RPCInterceptorFunc {
+		return func(target string, req *tikvrpc.Request) (*tikvrpc.Response, error) {
+			tikvrpc.AttachContext(req, req.Context)
+			switch req.Req.(type) {
+			case *kvrpcpb.GetRequest, *kvrpcpb.BatchGetRequest, *kvrpcpb.ScanRequest, *coprocessor.Request:
+				checkedReqCnt.Add(1)
+				require.False(t, req.Context.GetReplicaRead())
+			default:
+			}
+			return next(target, req)
+		}
+	}))
+
+	tk.MustExec("begin pessimistic")
+	// Milestone-1 requires a prior non-shared primary lock before FOR SHARE in shared-lock mode.
+	tk.MustQueryWithContext(interceptorCtx, "select * from t where id = 1 for update").Check(testkit.Rows("1 10"))
+	tk.MustQueryWithContext(interceptorCtx, "select * from t use index(idx_v) where v = 20 for share").Check(testkit.Rows("2 20"))
+	require.Greater(t, checkedReqCnt.Load(), int64(0), "interceptor should observe at least one read RPC")
+	tk.MustExec("rollback")
 }
