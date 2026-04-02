@@ -3752,6 +3752,10 @@ var defaultSysVars = []*SysVar{
 		s.EnableLazyCursorFetch = TiDBOptOn(val)
 		return nil
 	}},
+	{Scope: vardef.ScopeGlobal | vardef.ScopeSession, Name: vardef.TiDBEnableForShareSharedLock, Value: BoolToOnOff(vardef.DefTiDBEnableForShareSharedLock), Type: vardef.TypeBool, SetSession: func(s *SessionVars, val string) error {
+		s.EnableForShareSharedLock = TiDBOptOn(val)
+		return nil
+	}},
 	{Scope: vardef.ScopeGlobal | vardef.ScopeSession, Name: vardef.TiDBEnableSharedLockPromotion, Value: BoolToOnOff(vardef.DefTiDBEnableSharedLockPromotion), Type: vardef.TypeBool, SetSession: func(s *SessionVars, val string) error {
 		if s.NoopFuncsMode != OffInt && TiDBOptOn(val) {
 			logutil.BgLogger().Warn("tidb_enable_shared_lock_promotion set to on would override tidb_enable_noop_functions on")

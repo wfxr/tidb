@@ -491,6 +491,9 @@ type StatementContext struct {
 	// and the `for share` execution is enabled by `tidb_enable_noop_functions`, no locks should be
 	// acquired in this case.
 	ForShareLockEnabledByNoop bool
+	// ForShareLockEnabledBySharedLock indicates whether the current statement contains `for share`
+	// clause and uses the shared-lock gate path.
+	ForShareLockEnabledBySharedLock bool
 
 	// OperatorNum is used to record the number of operators in the current logical plan.
 	OperatorNum uint64

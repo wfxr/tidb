@@ -3696,47 +3696,57 @@ func TestForShareWithPromotion(t *testing.T) {
 	tk.MustExec("insert into t values(1, 10)")
 	tk.MustExec("set innodb_lock_wait_timeout = 1")
 
-	for _, tt := range []struct {
-		ForShareNoopEnable     bool
-		ForShareUpgradeEnabled bool
-	}{
-		{false, false},
-		{false, true},
-		{true, false},
-		{true, true},
-	} {
-		tk.MustExec(fmt.Sprintf("set @@tidb_enable_noop_functions = %v", tt.ForShareNoopEnable))
-		tk.MustExec(fmt.Sprintf("set @@tidb_enable_shared_lock_promotion = %v", tt.ForShareUpgradeEnabled))
-
-		tk1.MustExec("begin")
-		tk1.MustQuery("select * from t for update").Check(testkit.Rows("1 10"))
-
-		tk.MustExec("begin")
-		if tt.ForShareUpgradeEnabled {
-			_, err := tk.Exec("select * from t where a = 1 for share nowait")
-			require.True(t, strings.Contains(err.Error(), "could not be acquired immediately and NOWAIT is set"))
-			_, err = tk.Exec("select * from t for share nowait")
-			require.True(t, strings.Contains(err.Error(), "could not be acquired immediately and NOWAIT is set"))
-			_, err = tk.Exec("select * from t where a = 1 for share")
-			require.True(t, strings.Contains(err.Error(), "Lock wait timeout exceeded; try restarting transaction"))
-			_, err = tk.Exec("select * from t for share")
-			require.True(t, strings.Contains(err.Error(), "Lock wait timeout exceeded; try restarting transaction"))
-		} else if tt.ForShareNoopEnable {
-			tk.MustQuery("select * from t where a = 1 for share nowait").Check(testkit.Rows("1 10"))
-			tk.MustQuery("select * from t where a = 1 for share").Check(testkit.Rows("1 10"))
-			tk.MustQuery("select * from t for share").Check(testkit.Rows("1 10"))
-			tk.MustQuery("select * from t").Check(testkit.Rows("1 10"))
-		} else {
-			_, err := tk.Exec("select * from t where a = 1 for share nowait")
-			require.True(t, strings.Contains(err.Error(), "use tidb_enable_noop_functions to enable"))
-			_, err = tk.Exec("select * from t for share")
-			require.True(t, strings.Contains(err.Error(), "use tidb_enable_noop_functions to enable"))
-			_, err = tk.Exec("select * from t for share nowait")
-			require.True(t, strings.Contains(err.Error(), "use tidb_enable_noop_functions to enable"))
-		}
-		tk.MustExec("rollback")
-		tk1.MustExec("rollback")
+	setForShareSwitches := func(noop, promotion, sharedLock int) {
+		tk.MustExec(fmt.Sprintf("set @@tidb_enable_noop_functions = %v", noop))
+		tk.MustExec(fmt.Sprintf("set @@tidb_enable_shared_lock_promotion = %v", promotion))
+		tk.MustExec(fmt.Sprintf("set @@tidb_enable_for_share_shared_lock = %v", sharedLock))
 	}
+
+	// Gate off keeps compatibility behavior:
+	// - noop on: FOR SHARE is a noop.
+	// - noop off + promotion off: FOR SHARE remains blocked by noop policy.
+	// - noop off + promotion on: FOR SHARE uses the old promotion path.
+	tk1.MustExec("begin")
+	tk1.MustQuery("select * from t for update").Check(testkit.Rows("1 10"))
+
+	setForShareSwitches(1, 0, 0)
+	tk.MustExec("begin")
+	tk.MustQuery("select * from t where a = 1 for share nowait").Check(testkit.Rows("1 10"))
+	tk.MustQuery("select * from t where a = 1 for share").Check(testkit.Rows("1 10"))
+	tk.MustQuery("select * from t for share").Check(testkit.Rows("1 10"))
+	tk.MustExec("rollback")
+
+	setForShareSwitches(0, 0, 0)
+	_, err := tk.Exec("select * from t where a = 1 for share nowait")
+	require.True(t, strings.Contains(err.Error(), "use tidb_enable_noop_functions to enable"))
+	_, err = tk.Exec("select * from t for share")
+	require.True(t, strings.Contains(err.Error(), "use tidb_enable_noop_functions to enable"))
+
+	setForShareSwitches(0, 1, 0)
+	tk.MustExec("begin")
+	_, err = tk.Exec("select * from t where a = 1 for share nowait")
+	require.True(t, strings.Contains(err.Error(), "could not be acquired immediately and NOWAIT is set"))
+	_, err = tk.Exec("select * from t where a = 1 for share")
+	require.True(t, strings.Contains(err.Error(), "Lock wait timeout exceeded; try restarting transaction"))
+	tk.MustExec("rollback")
+
+	// Compatibility path with gate off: promotion on should still override noop on.
+	setForShareSwitches(1, 1, 0)
+	tk.MustExec("begin")
+	_, err = tk.Exec("select * from t where a = 1 for share nowait")
+	require.True(t, strings.Contains(err.Error(), "could not be acquired immediately and NOWAIT is set"))
+	tk.MustExec("rollback")
+
+	// Gate on: FOR SHARE should take the shared-lock path, not the compatibility noop/promotion policy.
+	// Even with promotion disabled, conflicting X lock should block FOR SHARE.
+	setForShareSwitches(1, 0, 1)
+	tk.MustExec("begin")
+	_, err = tk.Exec("select * from t where a = 1 for share nowait")
+	require.True(t, strings.Contains(err.Error(), "could not be acquired immediately and NOWAIT is set"))
+	_, err = tk.Exec("select * from t where a = 1 for share")
+	require.True(t, strings.Contains(err.Error(), "Lock wait timeout exceeded; try restarting transaction"))
+	tk.MustExec("rollback")
+	tk1.MustExec("rollback")
 }
 
 func TestForShareWithPromotionPlanCache(t *testing.T) {
@@ -3751,6 +3761,7 @@ func TestForShareWithPromotionPlanCache(t *testing.T) {
 	tk.MustExec(`set @pk=1`)
 
 	tk.MustExec(fmt.Sprintf("set @@tidb_enable_noop_functions = %v", 1))
+	tk.MustExec(fmt.Sprintf("set @@tidb_enable_for_share_shared_lock = %v", 0))
 	tk.MustExec(`prepare st from 'select * from t where a=? for share'`)
 
 	tk.MustExec(`execute st using @pk`)
@@ -3760,9 +3771,17 @@ func TestForShareWithPromotionPlanCache(t *testing.T) {
 	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0"))
 	tk.MustExec(`rollback`)
 
-	// can't reuse since the `tidb_enable_shared_lock_promotion` is changed.
+	// can't reuse since `tidb_enable_shared_lock_promotion` is changed.
 	tk.MustExec(`execute st using @pk`)
 	tk.MustExec(fmt.Sprintf("set @@tidb_enable_shared_lock_promotion = %v", 1))
+	tk.MustExec(`execute st using @pk`)
+	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0"))
+	tk.MustExec(`execute st using @pk`)
+	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("1"))
+
+	// can't reuse since `tidb_enable_for_share_shared_lock` is changed.
+	tk.MustExec(`execute st using @pk`)
+	tk.MustExec(fmt.Sprintf("set @@tidb_enable_for_share_shared_lock = %v", 1))
 	tk.MustExec(`execute st using @pk`)
 	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0"))
 	tk.MustExec(`execute st using @pk`)

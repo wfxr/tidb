@@ -388,7 +388,7 @@ func NewPlanCacheKey(sctx sessionctx.Context, stmt *PlanCacheStmt) (key, binding
 	// dirty tables
 	hashLen += 8 * len(vars.StmtCtx.TblInfo2UnionScan)
 	// txn status
-	hashLen += 6
+	hashLen += 8
 
 	hash := make([]byte, 0, hashLen)
 	// hashInitCap is not used, just for test purposes
@@ -492,7 +492,9 @@ func NewPlanCacheKey(sctx sessionctx.Context, stmt *PlanCacheStmt) (key, binding
 	hash = append(hash, bool2Byte(vars.IsAutocommit()))
 	hash = append(hash, bool2Byte(config.GetGlobalConfig().PessimisticTxn.PessimisticAutoCommit.Load()))
 	hash = append(hash, bool2Byte(vars.StmtCtx.ForShareLockEnabledByNoop))
+	hash = append(hash, bool2Byte(vars.StmtCtx.ForShareLockEnabledBySharedLock))
 	hash = append(hash, bool2Byte(vars.SharedLockPromotion))
+	hash = append(hash, bool2Byte(vars.EnableForShareSharedLock))
 
 	if intest.InTest {
 		if cap(hash) != hashInitCap {

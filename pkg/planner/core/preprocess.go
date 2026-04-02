@@ -1301,15 +1301,21 @@ func (p *preprocessor) checkConstraintGrammar(stmt *ast.Constraint) {
 }
 
 func (p *preprocessor) checkSelectNoopFuncs(stmt *ast.SelectStmt) {
-	noopFuncsMode := p.sctx.GetSessionVars().NoopFuncsMode
+	sessVars := p.sctx.GetSessionVars()
+	noopFuncsMode := sessVars.NoopFuncsMode
+	forShareLock := stmt.LockInfo != nil && (stmt.LockInfo.LockType == ast.SelectLockForShare ||
+		stmt.LockInfo.LockType == ast.SelectLockForShareNoWait)
+	forShareSharedLockEnabled := forShareLock && sessVars.EnableForShareSharedLock
+	if forShareSharedLockEnabled {
+		sessVars.StmtCtx.ForShareLockEnabledBySharedLock = true
+	}
 	if noopFuncsMode == variable.OnInt {
 		// Set `ForShareLockEnabledByNoop` properly before returning.
 		// When `tidb_enable_shared_lock_promotion` is enabled, the `for share` statements would be
-		// executed as `for update` statements despite setting of noop functions.
-		if stmt.LockInfo != nil && (stmt.LockInfo.LockType == ast.SelectLockForShare ||
-			stmt.LockInfo.LockType == ast.SelectLockForShareNoWait) &&
-			!p.sctx.GetSessionVars().SharedLockPromotion {
-			p.sctx.GetSessionVars().StmtCtx.ForShareLockEnabledByNoop = true
+		// executed as `for update` statements despite setting of noop functions. The shared-lock gate
+		// has a higher priority and bypasses noop semantics.
+		if forShareLock && !forShareSharedLockEnabled && !sessVars.SharedLockPromotion {
+			sessVars.StmtCtx.ForShareLockEnabledByNoop = true
 		}
 		return
 	}
@@ -1325,17 +1331,15 @@ func (p *preprocessor) checkSelectNoopFuncs(stmt *ast.SelectStmt) {
 
 	// When `tidb_enable_shared_lock_promotion` is enabled, the `for share` statements would be
 	// executed as `for update` statements.
-	if stmt.LockInfo != nil && (stmt.LockInfo.LockType == ast.SelectLockForShare ||
-		stmt.LockInfo.LockType == ast.SelectLockForShareNoWait) &&
-		!p.sctx.GetSessionVars().SharedLockPromotion {
+	if forShareLock && !forShareSharedLockEnabled && !sessVars.SharedLockPromotion {
 		err := expression.ErrFunctionsNoopImpl.GenWithStackByArgs("LOCK IN SHARE MODE")
 		if noopFuncsMode == variable.OffInt {
 			p.err = err
 			return
 		}
 		// NoopFuncsMode is Warn, append an error
-		p.sctx.GetSessionVars().StmtCtx.AppendWarning(err)
-		p.sctx.GetSessionVars().StmtCtx.ForShareLockEnabledByNoop = true
+		sessVars.StmtCtx.AppendWarning(err)
+		sessVars.StmtCtx.ForShareLockEnabledByNoop = true
 	}
 }
 
