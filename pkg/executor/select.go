@@ -298,7 +298,12 @@ func (e *SelectLockExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	for id := range e.tblID2Handle {
 		e.UpdateDeltaForTableID(id)
 	}
-	lockCtx, err := newLockCtx(e.Ctx(), lockWaitTime, len(e.keys), false)
+	lockMode := kv.PessimisticLockExclusive
+	if e.Ctx().GetSessionVars().StmtCtx.ForShareLockEnabledBySharedLock &&
+		(e.Lock.LockType == ast.SelectLockForShare || e.Lock.LockType == ast.SelectLockForShareNoWait) {
+		lockMode = kv.PessimisticLockShared
+	}
+	lockCtx, err := newLockCtx(e.Ctx(), lockWaitTime, len(e.keys), lockMode)
 	if err != nil {
 		return err
 	}
@@ -335,7 +340,7 @@ func checkMaxExecutionTimeExceeded(sctx sessionctx.Context) error {
 	return nil
 }
 
-func newLockCtx(sctx sessionctx.Context, lockWaitTime int64, numKeys int, inSharedMode bool) (*tikvstore.LockCtx, error) {
+func newLockCtx(sctx sessionctx.Context, lockWaitTime int64, numKeys int, lockMode kv.PessimisticLockMode) (*tikvstore.LockCtx, error) {
 	seVars := sctx.GetSessionVars()
 	forUpdateTS, err := sessiontxn.GetTxnManager(sctx).GetStmtForUpdateTS()
 	if err != nil {
@@ -344,7 +349,7 @@ func newLockCtx(sctx sessionctx.Context, lockWaitTime int64, numKeys int, inShar
 	lockCtx := tikvstore.NewLockCtx(forUpdateTS, lockWaitTime, seVars.StmtCtx.GetLockWaitStartTime())
 	lockCtx.Killed = &seVars.SQLKiller.Signal
 	lockCtx.LockExpired = &seVars.TxnCtx.LockExpire
-	lockCtx.InShareMode = inSharedMode
+	lockCtx.InShareMode = lockMode.InShareMode()
 
 	// Set max_execution_time deadline for SELECT statements
 	maxExectionTime := seVars.GetMaxExecutionTime()

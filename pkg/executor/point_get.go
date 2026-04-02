@@ -606,7 +606,7 @@ func (e *PointGetExecutor) lockKeyBase(ctx context.Context,
 			return nil, err
 		}
 
-		lockCtx, err := newLockCtx(e.Ctx(), lockWaitTime, 1, false)
+		lockCtx, err := newLockCtx(e.Ctx(), lockWaitTime, 1, kv.PessimisticLockExclusive)
 		if err != nil {
 			return nil, err
 		}

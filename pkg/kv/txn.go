@@ -40,6 +40,22 @@ const (
 	TimeToPrintLongTimeInternalTxn = time.Minute * 5
 )
 
+// PessimisticLockMode describes whether pessimistic locking should acquire
+// exclusive locks or shared locks.
+type PessimisticLockMode uint8
+
+const (
+	// PessimisticLockExclusive acquires normal exclusive pessimistic locks.
+	PessimisticLockExclusive PessimisticLockMode = iota
+	// PessimisticLockShared acquires shared pessimistic locks.
+	PessimisticLockShared
+)
+
+// InShareMode indicates whether the lock mode should use shared-lock semantics.
+func (m PessimisticLockMode) InShareMode() bool {
+	return m == PessimisticLockShared
+}
+
 var globalInnerTxnTsBox = innerTxnStartTsBox{
 	innerTSLock:        sync.Mutex{},
 	innerTxnStartTsMap: make(map[uint64]struct{}, 256),

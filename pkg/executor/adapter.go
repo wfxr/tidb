@@ -1165,7 +1165,11 @@ func (a *ExecStmt) handlePessimisticDML(ctx context.Context, e exec.Executor) (e
 		if len(keys) == 0 {
 			return nil, nil
 		}
-		lockCtx, err := newLockCtx(sctx, seVars.LockWaitTimeout, len(keys), shared)
+		lockMode := kv.PessimisticLockExclusive
+		if shared {
+			lockMode = kv.PessimisticLockShared
+		}
+		lockCtx, err := newLockCtx(sctx, seVars.LockWaitTimeout, len(keys), lockMode)
 		if err != nil {
 			return nil, err
 		}

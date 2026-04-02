@@ -3686,6 +3686,68 @@ func TestEndTxnOnLockExpire(t *testing.T) {
 	}
 }
 
+func TestForShareUsesSharedLockAfterPrimarySelected(t *testing.T) {
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk1 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(t, store)
+	tk3 := testkit.NewTestKit(t, store)
+	tk4 := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk1.MustExec("use test")
+	tk2.MustExec("use test")
+	tk3.MustExec("use test")
+	tk4.MustExec("use test")
+
+	tk.MustExec("create table t (id int primary key, v int, key idx_v(v))")
+	tk.MustExec("insert into t values (1, 10), (2, 20)")
+	tk.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+	tk1.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk1.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk1.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+	tk2.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk2.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk2.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+	tk3.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk3.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk3.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+	tk4.MustExec("set @@tidb_enable_noop_functions = 0")
+	tk4.MustExec("set @@tidb_enable_shared_lock_promotion = 0")
+	tk4.MustExec("set @@tidb_enable_for_share_shared_lock = 1")
+
+	tk1.MustExec("begin pessimistic")
+	// Milestone-1 precondition: transaction must first own a non-shared primary key lock.
+	tk1.MustQuery("select * from t where id = 1 for update").Check(testkit.Rows("1 10"))
+	// Then FOR SHARE on another key should use shared-lock mode.
+	// Force non-unique index access so this goes through SelectLockExec (not point get).
+	tk1.MustQuery("select * from t use index(idx_v) where v = 20 for share").Check(testkit.Rows("2 20"))
+
+	tk2.MustExec("begin pessimistic")
+	// Another transaction can hold FOR SHARE on the same key concurrently.
+	tk2.MustQuery("select * from t use index(idx_v) where v = 20 for share").Check(testkit.Rows("2 20"))
+
+	tk3.MustExec("begin pessimistic")
+	// Exclusive waiter must block behind shared holders.
+	ch := mustExecAsync(tk3, "update t set v = v + 1 where id = 2")
+	mustTimeout(t, ch, 100*time.Millisecond)
+	// Non-shared contender on the same non-unique-index path should also block.
+	tk4.MustExec("begin pessimistic")
+	err := tk4.ExecToErr("select * from t use index(idx_v) where v = 20 for update wait 1")
+	require.ErrorContains(t, err, "Lock wait timeout exceeded")
+
+	// Releasing one holder should still block because another shared holder remains.
+	tk1.MustExec("rollback")
+	mustTimeout(t, ch, 100*time.Millisecond)
+
+	// Releasing the last holder should let the exclusive waiter continue.
+	tk2.MustExec("rollback")
+	mustRecv(t, ch)
+	tk3.MustExec("rollback")
+	tk4.MustExec("rollback")
+}
+
 func TestForShareWithPromotion(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
