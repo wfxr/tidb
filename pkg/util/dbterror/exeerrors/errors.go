@@ -64,6 +64,7 @@ var (
 	ErrMemoryExceedForQuery                 = dbterror.ClassExecutor.NewStd(mysql.ErrMemoryExceedForQuery)
 	ErrMemoryExceedForInstance              = dbterror.ClassExecutor.NewStd(mysql.ErrMemoryExceedForInstance)
 	ErrDeleteNotFoundColumn                 = dbterror.ClassExecutor.NewStd(mysql.ErrDeleteNotFoundColumn)
+	ErrForShareRequiresPrimaryInMilestone1  = dbterror.ClassExecutor.NewStdErr(mysql.ErrUnknown, parser_mysql.Message("milestone-1 restriction: SELECT ... FOR SHARE requires a prior non-shared primary key lock in pessimistic transactions", nil))
 
 	ErrBRIEBackupFailed               = dbterror.ClassExecutor.NewStd(mysql.ErrBRIEBackupFailed)
 	ErrBRIERestoreFailed              = dbterror.ClassExecutor.NewStd(mysql.ErrBRIERestoreFailed)
